@@ -10,13 +10,13 @@ from sklearn.cluster import MiniBatchKMeans
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, ExtraTreesRegressor, AdaBoostRegressor, GradientBoostingRegressor, GradientBoostingClassifier
 from sklearn.feature_selection import GenericUnivariateSelect, RFECV, SelectFromModel
 from sklearn.grid_search import GridSearchCV, RandomizedSearchCV
-from sklearn.linear_model import RandomizedLasso, RandomizedLogisticRegression, RANSACRegressor,                 LinearRegression, Ridge, Lasso, ElasticNet, LassoLars, OrthogonalMatchingPursuit, BayesianRidge, ARDRegression, SGDRegressor, PassiveAggressiveRegressor, LogisticRegression, RidgeClassifier, SGDClassifier, Perceptron, PassiveAggressiveClassifier
+from sklearn.linear_model import RandomizedLasso, RandomizedLogisticRegression, RANSACRegressor, LinearRegression, Ridge, Lasso, ElasticNet, LassoLars, OrthogonalMatchingPursuit, BayesianRidge, ARDRegression, SGDRegressor, PassiveAggressiveRegressor, LogisticRegression, RidgeClassifier, SGDClassifier, Perceptron, PassiveAggressiveClassifier
 from sklearn.metrics import mean_squared_error, make_scorer, brier_score_loss
 from sklearn.preprocessing import LabelBinarizer, OneHotEncoder
 from sklearn.feature_extraction.text import TfidfVectorizer
 import scipy
 
-import xgboost as xgb
+# import xgboost as xgb
 
 def split_output(X, output_column_name, verbose=False):
     y = []
@@ -318,14 +318,14 @@ def add_date_features(date_val, row, date_col):
 
 
 def get_model_from_name(model_name):
-    import xgboost as xgb
+    # import xgboost as xgb
     from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegressor
     model_map = {
         # Classifiers
         'LogisticRegression': LogisticRegression(n_jobs=-2),
         'RandomForestClassifier': RandomForestClassifier(n_jobs=-2),
         'RidgeClassifier': RidgeClassifier(),
-        'XGBClassifier': xgb.XGBClassifier(),
+        # 'XGBClassifier': xgb.XGBClassifier(),
         'GradientBoostingClassifier': GradientBoostingClassifier(),
 
         'SGDClassifier': SGDClassifier(n_jobs=-1),
@@ -336,7 +336,7 @@ def get_model_from_name(model_name):
         'LinearRegression': LinearRegression(n_jobs=-2),
         'RandomForestRegressor': RandomForestRegressor(n_jobs=-2),
         'Ridge': Ridge(),
-        'XGBRegressor': xgb.XGBRegressor(),
+        # 'XGBRegressor': xgb.XGBRegressor(),
         'ExtraTreesRegressor': ExtraTreesRegressor(n_jobs=-1),
         'AdaBoostRegressor': AdaBoostRegressor(n_estimators=5),
         'RANSACRegressor': RANSACRegressor(),
