@@ -480,6 +480,12 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
 
         return self.model.predict(X_predict)
 
+    # If we are using this inside a FeatureUnion, we will want to get predictions available as a transform, to create a feature that will eventually be fed into our meta-estimator.
+    def transform(self, X):
+        predictions = self.predict(X)
+        return [[row] for row in predictions]
+        return self.predict(X)
+
 
 def write_gs_param_results_to_file(trained_gs, most_recent_filename):
 
@@ -599,7 +605,7 @@ class FeatureSelectionTransformer(BaseEstimator, TransformerMixin):
 
 
 def rmse_scoring(estimator, X, y, took_log_of_y=False):
-    if isinstance(estimator, GradientBoostingRegressor):
+    if isinstance(estimator, GradientBoostingRegressor) and scipy.sparse.issparse(X):
         X = X.toarray()
     predictions = estimator.predict(X)
     if took_log_of_y:
@@ -610,7 +616,7 @@ def rmse_scoring(estimator, X, y, took_log_of_y=False):
 
 
 def brier_score_loss_wrapper(estimator, X, y):
-    if isinstance(estimator, GradientBoostingClassifier):
+    if isinstance(estimator, GradientBoostingClassifier) and scipy.sparse.issparse(X):
         X = X.toarray()
 
     predictions = estimator.predict_proba(X)
@@ -818,3 +824,13 @@ class MakeSubpredictorPrediction(BaseEstimator, TransformerMixin):
         # else:
         #     return predictions
 
+class PassThroughX(BaseEstimator, TransformerMixin):
+
+    def __init__(self):
+        pass
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X, y=None):
+        return X

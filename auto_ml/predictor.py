@@ -101,19 +101,26 @@ class Predictor(object):
         if perform_feature_scaling is True or (self.compute_power >= 7 and self.perform_feature_scaling is not False):
             primary_data_formatting_pipeline.append(('scaler', utils.CustomSparseScaler(self.column_descriptions)))
 
-        primary_data_formatting_pipeline.append(('dv', DictVectorizer(sparse=True, sort=True)))
+        primary_data_formatting_pipeline.append(('dv', DictVectorizer(sparse=False, sort=True)))
 
         # This primary data formatting pipeline will form the first part of our feature union
-        feature_union_list.append(('data_formatting', Pipeline(primary_data_formatting_pipeline)))
+        master_pipeline_list.append(('data_formatting', Pipeline(primary_data_formatting_pipeline)))
 
         # Each of our trained subpredictors will make a prediction in their own parallel branch of the FeatureUnion.
         # In this way, if we have 10 different subpredictors, instead of running them in series, we can run all of them at the same time.
         if len(self.subpredictors) > 0:
-            for subpredictor in self.subpredictors:
-                feature_union_list.append(('subpredictor', utils.MakeSubpredictorPrediction(trained_subpredictor=subpredictor)))
 
-        # Our master_pipeline will now start with this feature union to get the complete set of available features
-        master_pipeline_list.append(('feature_extraction_union', FeatureUnion(feature_union_list, n_jobs=4)))
+            # In our FeatureUnion, we'll need to pass through all the base extracted features from this row
+            feature_union_list.append(('all_X', utils.PassThroughX()))
+
+            for subpredictor in self.subpredictors:
+                subpredictor_pipeline = []
+                subpredictor_pipeline.append(('sub_feature_selection', subpredictor.trained_pipeline.named_steps['feature_selection']))
+                subpredictor_pipeline.append(('subpredictor_predictor', subpredictor.trained_pipeline.named_steps['final_model']))
+                feature_union_list.append(('subpredictor', Pipeline(subpredictor_pipeline)))
+
+            # Our master_pipeline will now start with this feature union to get the complete set of available features
+            master_pipeline_list.append(('feature_extraction_union', FeatureUnion(feature_union_list, n_jobs=-1)))
 
         # Now that we've extracted all the features we might be interested in, select only the ones that prove useful
         if self.perform_feature_selection:
@@ -121,8 +128,8 @@ class Predictor(object):
             master_pipeline_list.append(('feature_selection', utils.FeatureSelectionTransformer(type_of_estimator=self.type_of_estimator, feature_selection_model='SelectFromModel') ))
 
         # If the user wants us to add a prediction on which cluster this item falls into, add that in only after we've found useful features
-        if self.add_cluster_prediction or (self.compute_power >=10 and self.add_cluster_prediction is not False):
-            master_pipeline_list.append(('add_cluster_prediction', utils.AddPredictedFeature(model_name='MiniBatchKMeans', type_of_estimator=self.type_of_estimator, include_original_X=True)))
+        # if self.add_cluster_prediction or (self.compute_power >=10 and self.add_cluster_prediction is not False):
+        #     master_pipeline_list.append(('add_cluster_prediction', utils.AddPredictedFeature(model_name='MiniBatchKMeans', type_of_estimator=self.type_of_estimator, include_original_X=True)))
 
         final_model = utils.get_model_from_name(model_name)
 
