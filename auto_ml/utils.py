@@ -224,13 +224,13 @@ class BasicDataCleaning(BaseEstimator, TransformerMixin):
                     break
         # must look at an alternate way of doing this
         if inputflag:
-            input = [] #check if this leads to memory leak??
+            corpus = [] #check if this leads to memory leak??
             for row in X:
                 for key, val in row.items():
                     col_desc = self.column_descriptions.get(key)
-                    if col_desc=="text" or col_desc=="nlp":
-                            input.append(val)
-            self.tfidfvec.fit(input)
+                    if col_desc in ('text', 'nlp'):
+                            corpus.append(val)
+            self.tfidfvec.fit(corpus)
             return self
         else:
             return self
@@ -256,10 +256,11 @@ class BasicDataCleaning(BaseEstimator, TransformerMixin):
                 elif col_desc == 'date':
                     clean_row = add_date_features(val, clean_row, key)
                 # if input column contains text, then in such a case calculated tfidf which if already fitted before transform
-                elif col_desc == 'text' or col_desc=="nlp":
+                elif col_desc in ('text','nlp'):
+
                     #add keys as features and tfvector values as values into cleanrow dictionary object
-                    keys=self.tfidfvec.get_feature_names()
-                    tfvec=self.tfidfvec.transform([val]).toarray()
+                    keys = self.tfidfvec.get_feature_names()
+                    tfvec = self.tfidfvec.transform([val]).toarray()
                     for i in range(len(tfvec)):
                         clean_row[keys[i]]=tfvec[0][i]
                 elif col_desc in self.vals_to_ignore:
@@ -777,6 +778,9 @@ class AddSubpredictorPredictions(BaseEstimator, TransformerMixin):
 
 
     def transform(self, X, y=None):
+        if isinstance(X, dict):
+            X = [X]
+
         predictions = []
         for predictor in self.trained_subpredictors:
 
@@ -790,7 +794,10 @@ class AddSubpredictorPredictions(BaseEstimator, TransformerMixin):
             X_copy = []
             for row_idx, row in enumerate(X):
 
-                row_copy = row.copy()
+                row_copy = {}
+                for key, val in row.items():
+                    row_copy[key] = val
+
                 for pred_idx, name in enumerate(self.sub_names):
 
                     row_copy[name + '_sub_prediction'] = predictions[pred_idx][row_idx]

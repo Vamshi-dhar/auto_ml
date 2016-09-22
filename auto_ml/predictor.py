@@ -642,6 +642,8 @@ class Predictor(object):
 
 
     def predict(self, prediction_data):
+        if isinstance(prediction_data, dict):
+            prediction_data = [prediction_data]
 
         # if self.model_name[:13] == 'GradientBoosting' and scipy.issparse(prediction_data):
         #     prediction_data
