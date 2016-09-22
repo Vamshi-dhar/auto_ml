@@ -764,13 +764,15 @@ class AddPredictedFeature(BaseEstimator, TransformerMixin):
             return predictions
 
 
-class AddSubpredictorPredictions(BaseEstimator, TransformerMixin):
+class MakeSubpredictorPrediction(BaseEstimator, TransformerMixin):
 
 
-    def __init__(self, trained_subpredictors, include_original_X=True):
-        self.trained_subpredictors = trained_subpredictors
-        self.include_original_X = include_original_X
-        self.sub_names = [pred.output_column for pred in self.trained_subpredictors]
+    def __init__(self, trained_subpredictor):
+        self.trained_subpredictor = trained_subpredictor
+        self.sub_name = self.trained_subpredictor.output_column
+
+    def get_feature_names(self):
+        return self.sub_name + '_sub_prediction'
 
 
     def fit(self, X, y=None):
@@ -778,34 +780,41 @@ class AddSubpredictorPredictions(BaseEstimator, TransformerMixin):
 
 
     def transform(self, X, y=None):
-        if isinstance(X, dict):
-            X = [X]
-
-        predictions = []
-        for predictor in self.trained_subpredictors:
-
-            if predictor.type_of_estimator == 'regressor':
-                predictions.append(predictor.predict(X))
-
-            else:
-                predictions.append(predictor.predict(X))
-
-        if self.include_original_X:
-            X_copy = []
-            for row_idx, row in enumerate(X):
-
-                row_copy = {}
-                for key, val in row.items():
-                    row_copy[key] = val
-
-                for pred_idx, name in enumerate(self.sub_names):
-
-                    row_copy[name + '_sub_prediction'] = predictions[pred_idx][row_idx]
-
-                X_copy.append(row_copy)
-
-            return X_copy
-
-        else:
+        predictions = self.trained_subpredictor.predict(X)
+        if len(X) == 1:
             return predictions
+        else:
+            return [[row] for row in predictions]
+
+        # if isinstance(X, dict):
+        #     X = [X]
+
+
+        # predictions = []
+        # for predictor in self.trained_subpredictors:
+
+        #     if predictor.type_of_estimator == 'regressor':
+        #         predictions.append(predictor.predict(X))
+
+        #     else:
+        #         predictions.append(predictor.predict(X))
+
+        # if self.include_original_X:
+        #     X_copy = []
+        #     for row_idx, row in enumerate(X):
+
+        #         row_copy = {}
+        #         for key, val in row.items():
+        #             row_copy[key] = val
+
+        #         for pred_idx, name in enumerate(self.sub_names):
+
+        #             row_copy[name + '_sub_prediction'] = predictions[pred_idx][row_idx]
+
+        #         X_copy.append(row_copy)
+
+        #     return X_copy
+
+        # else:
+        #     return predictions
 

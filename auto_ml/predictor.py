@@ -14,7 +14,7 @@ from sklearn.decomposition import TruncatedSVD
 from sklearn.feature_extraction import DictVectorizer
 from sklearn.grid_search import GridSearchCV
 from sklearn.metrics import mean_squared_error, brier_score_loss, make_scorer
-from sklearn.pipeline import Pipeline
+from sklearn.pipeline import FeatureUnion, Pipeline
 from sklearn.preprocessing import FunctionTransformer
 
 from auto_ml import utils
@@ -77,36 +77,60 @@ class Predictor(object):
 
     def _construct_pipeline(self, model_name='LogisticRegression', impute_missing_values=True, perform_feature_scaling=True):
 
-        pipeline_list = []
+        feature_union_list = []
+        master_pipeline_list = []
 
-        if len(self.subpredictors) > 0:
-            pipeline_list.append(('subpredictors', utils.AddSubpredictorPredictions(trained_subpredictors=self.subpredictors)))
+        # First, make our primary data formatting pipeline
+        # This pipeline will:
+            # Get data from teh user_func
+            # Grab date features
+            # Do the basic data transformation/cleaning
+            # Scale the data
+            # DictVectorize our input dictionaries
+        primary_data_formatting_pipeline = []
+
         if self.user_input_func is not None:
-            pipeline_list.append(('user_func', FunctionTransformer(func=self.user_input_func, pass_y=False, validate=False) ))
+            primary_data_formatting_pipeline.append(('user_func', FunctionTransformer(func=self.user_input_func, pass_y=False, validate=False) ))
 
         if len(self.date_cols) > 0:
-            pipeline_list.append(('date_feature_engineering', date_feature_engineering.FeatureEngineer(date_cols=self.date_cols)))
+            primary_data_formatting_pipeline.append(('date_feature_engineering', date_feature_engineering.FeatureEngineer(date_cols=self.date_cols)))
 
         # These parts will be included no matter what.
-        pipeline_list.append(('basic_transform', utils.BasicDataCleaning(column_descriptions=self.column_descriptions)))
+        primary_data_formatting_pipeline.append(('basic_transform', utils.BasicDataCleaning(column_descriptions=self.column_descriptions)))
 
         if perform_feature_scaling is True or (self.compute_power >= 7 and self.perform_feature_scaling is not False):
-            pipeline_list.append(('scaler', utils.CustomSparseScaler(self.column_descriptions)))
+            primary_data_formatting_pipeline.append(('scaler', utils.CustomSparseScaler(self.column_descriptions)))
 
-        pipeline_list.append(('dv', DictVectorizer(sparse=True, sort=True)))
+        primary_data_formatting_pipeline.append(('dv', DictVectorizer(sparse=True, sort=True)))
 
+        # This primary data formatting pipeline will form the first part of our feature union
+        feature_union_list.append(('data_formatting', Pipeline(primary_data_formatting_pipeline)))
+
+        # Each of our trained subpredictors will make a prediction in their own parallel branch of the FeatureUnion.
+        # In this way, if we have 10 different subpredictors, instead of running them in series, we can run all of them at the same time.
+        if len(self.subpredictors) > 0:
+            for subpredictor in self.subpredictors:
+                feature_union_list.append(('subpredictor', utils.MakeSubpredictorPrediction(trained_subpredictor=subpredictor)))
+
+        # Our master_pipeline will now start with this feature union to get the complete set of available features
+        master_pipeline_list.append(('feature_extraction_union', FeatureUnion(feature_union_list, n_jobs=4)))
+
+        # Now that we've extracted all the features we might be interested in, select only the ones that prove useful
         if self.perform_feature_selection:
             # pipeline_list.append(('pca', TruncatedSVD()))
-            pipeline_list.append(('feature_selection', utils.FeatureSelectionTransformer(type_of_estimator=self.type_of_estimator, feature_selection_model='SelectFromModel') ))
+            master_pipeline_list.append(('feature_selection', utils.FeatureSelectionTransformer(type_of_estimator=self.type_of_estimator, feature_selection_model='SelectFromModel') ))
 
+        # If the user wants us to add a prediction on which cluster this item falls into, add that in only after we've found useful features
         if self.add_cluster_prediction or (self.compute_power >=10 and self.add_cluster_prediction is not False):
-            pipeline_list.append(('add_cluster_prediction', utils.AddPredictedFeature(model_name='MiniBatchKMeans', type_of_estimator=self.type_of_estimator, include_original_X=True)))
+            master_pipeline_list.append(('add_cluster_prediction', utils.AddPredictedFeature(model_name='MiniBatchKMeans', type_of_estimator=self.type_of_estimator, include_original_X=True)))
 
         final_model = utils.get_model_from_name(model_name)
 
-        pipeline_list.append(('final_model', utils.FinalModelATC(model=final_model, model_name=model_name, type_of_estimator=self.type_of_estimator, ml_for_analytics=self.ml_for_analytics)))
+        # Finally, at the end, we want to have a model to make predictions
+        master_pipeline_list.append(('final_model', utils.FinalModelATC(model=final_model, model_name=model_name, type_of_estimator=self.type_of_estimator, ml_for_analytics=self.ml_for_analytics)))
 
-        constructed_pipeline = Pipeline(pipeline_list)
+        constructed_pipeline = Pipeline(master_pipeline_list)
+        print(constructed_pipeline)
         return constructed_pipeline
 
 
@@ -642,8 +666,11 @@ class Predictor(object):
 
 
     def predict(self, prediction_data):
-        if isinstance(prediction_data, dict):
-            prediction_data = [prediction_data]
+        # if isinstance(prediction_data, dict):
+        #     # prediction_data = [prediction_data]
+        #     input_as_list = [prediction_data]
+        # else:
+        #     input_as_list = prediction_data
 
         # if self.model_name[:13] == 'GradientBoosting' and scipy.issparse(prediction_data):
         #     prediction_data
@@ -651,6 +678,7 @@ class Predictor(object):
 
         # TODO(PRESTON): investigate if we need to handle input of a single dictionary differently than a list of dictionaries.
         predicted_vals = self.trained_pipeline.predict(prediction_data)
+        # predicted_vals = self.trained_pipeline.predict(prediction_data)
         if self.took_log_of_y:
             for idx, val in predicted_vals:
                 predicted_vals[idx] = math.exp(val)

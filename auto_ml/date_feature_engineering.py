@@ -49,6 +49,10 @@ class FeatureEngineer(BaseEstimator, TransformerMixin):
 
 
     def transform(self, X, y=None):
+
+        # When we make predictions, the pipeline oddly converts a list of a single item back to a dict. So here we will make our single prediction row back into a list again
+        if isinstance(X, dict):
+            X = [X]
         X_copy = []
         for idx, row in enumerate(X):
             row_copy = {}
