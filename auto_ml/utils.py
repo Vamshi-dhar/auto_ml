@@ -1,5 +1,6 @@
 import csv
 import datetime
+import itertools
 import math
 import numpy as np
 import os
@@ -12,6 +13,7 @@ from sklearn.feature_selection import GenericUnivariateSelect, RFECV, SelectFrom
 from sklearn.grid_search import GridSearchCV, RandomizedSearchCV
 from sklearn.linear_model import RandomizedLasso, RandomizedLogisticRegression, RANSACRegressor, LinearRegression, Ridge, Lasso, ElasticNet, LassoLars, OrthogonalMatchingPursuit, BayesianRidge, ARDRegression, SGDRegressor, PassiveAggressiveRegressor, LogisticRegression, RidgeClassifier, SGDClassifier, Perceptron, PassiveAggressiveClassifier
 from sklearn.metrics import mean_squared_error, make_scorer, brier_score_loss
+from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelBinarizer, OneHotEncoder
 from sklearn.feature_extraction.text import TfidfVectorizer
 import scipy
@@ -236,6 +238,7 @@ class BasicDataCleaning(BaseEstimator, TransformerMixin):
             return self
 
     def transform(self, X, y=None):
+
         clean_X = []
         deleted_values_sample = []
         deleted_info = {}
@@ -478,7 +481,9 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
         else:
             X_predict = X
 
-        return self.model.predict(X_predict)
+        predictions = self.model.predict(X_predict)
+
+        return predictions
 
     # If we are using this inside a FeatureUnion, we will want to get predictions available as a transform, to create a feature that will eventually be fed into our meta-estimator.
     def transform(self, X):
@@ -580,6 +585,9 @@ class FeatureSelectionTransformer(BaseEstimator, TransformerMixin):
 
 
     def fit(self, X, y=None):
+        self.expected_x_column_length = len(X[0])
+        # print('self.expected_x_column_length')
+        # print(self.expected_x_column_length)
 
         # self.selector = self._model_map[self.type_of_estimator][self.feature_selection_model]
         self.selector = get_feature_selection_model_from_name(self.type_of_estimator, self.feature_selection_model)
@@ -594,14 +602,29 @@ class FeatureSelectionTransformer(BaseEstimator, TransformerMixin):
         else:
             self.selector.fit(X, y)
             self.support_mask = self.selector.get_support()
+            # print('self.support_mask')
+            # print(self.support_mask)
         return self
 
 
     def transform(self, X, y=None):
+
         if self.selector == 'KeepAll':
             return X
-        else:
-            return self.selector.transform(X)
+
+        # There can be some collision in our subpredictors.
+        # Say we have 10 columns  of data when we train each subpredictor
+        # And we train up 3 subpredictors
+        # While we are fitting our meta-estimator, we will need to get a prediction from each subpredictor before we fit our final meta estimator
+        # This means that, depending on the implementation, we might end up with as many as 12 columns being fed in here.
+        # DictVectorizer has already been trained to put these new data points at the end. So FeatureSelectionTransformer can just ignore any columns longer than it was expecting to get
+        if len(X[0]) > self.expected_x_column_length:
+            X = [row[:self.expected_x_column_length] for row in X]
+
+        # Grab only the columns of data that have been pre-selected by the feature selection model we trained in .fit()
+        pruned_X = [list(itertools.compress(row, self.support_mask)) for row in X]
+
+        return pruned_X
 
 
 def rmse_scoring(estimator, X, y, took_log_of_y=False):
@@ -698,6 +721,7 @@ class CustomSparseScaler(BaseEstimator, TransformerMixin):
 
     # Perform basic min/max scaling, with the minor caveat that our min and max values are the 10th and 90th percentile values, to avoid outliers.
     def transform(self, X, y=None):
+
         if self.perform_feature_scaling:
             for row in X:
                 for k, v in row.items():
@@ -792,37 +816,81 @@ class MakeSubpredictorPrediction(BaseEstimator, TransformerMixin):
         else:
             return [[row] for row in predictions]
 
+
+class MakeSubpredictorPredictions(BaseEstimator, TransformerMixin):
+
+
+    def __init__(self, trained_subpredictors):
+        self.trained_subpredictors = []
+        # self.sub_name = self.trained_subpredictor.output_column
+        self.include_original_X = True
+        for subpredictor in trained_subpredictors:
+            abbreviated_pipeline = []
+            abbreviated_pipeline.append(('sub_feature_selection', subpredictor.trained_pipeline.named_steps['feature_selection']))
+            abbreviated_pipeline.append(('subpredictor_predictor', subpredictor.trained_pipeline.named_steps['final_model']))
+            self.trained_subpredictors.append(Pipeline(abbreviated_pipeline))
+
+
+    def get_feature_names(self):
+        return self.sub_name + '_sub_prediction'
+
+
+    def fit(self, X, y=None):
         # if isinstance(X, dict):
         #     X = [X]
-
 
         # predictions = []
         # for predictor in self.trained_subpredictors:
 
-        #     if predictor.type_of_estimator == 'regressor':
-        #         predictions.append(predictor.predict(X))
+        #     predictions.append(predictor.predict(X))
+        #     # if predictor.type_of_estimator == 'regressor':
+        #     #     predictions.append(predictor.predict(X))
 
-        #     else:
-        #         predictions.append(predictor.predict(X))
+        #     # else:
+        #     #     predictions.append(predictor.predict(X))
 
-        # if self.include_original_X:
-        #     X_copy = []
-        #     for row_idx, row in enumerate(X):
+        # for row in X:
+        #     for prediction in predictions:
+        #         row.append(prediction)
 
-        #         row_copy = {}
-        #         for key, val in row.items():
-        #             row_copy[key] = val
+        return self
 
-        #         for pred_idx, name in enumerate(self.sub_names):
 
-        #             row_copy[name + '_sub_prediction'] = predictions[pred_idx][row_idx]
+    def transform(self, X, y=None):
 
-        #         X_copy.append(row_copy)
+        if isinstance(X, dict):
+            X = [X]
 
-        #     return X_copy
+        predictions = []
+        for predictor in self.trained_subpredictors:
 
-        # else:
-        #     return predictions
+            predictions.append(predictor.predict(X))
+            # if predictor.type_of_estimator == 'regressor':
+            #     predictions.append(predictor.predict(X))
+
+            # else:
+            #     predictions.append(predictor.predict(X))
+        if self.include_original_X:
+            # if len(X) == 1:
+            #     print('X')
+            #     print(X)
+            #     print('predictions')
+            #     print(predictions)
+            #     return np.concatenate(X, predictions)
+            #     # return scipy.sparse.hstack(X, predictions)
+            # else:
+            #     for idx, row in enumerate(X):
+            #         for prediction in predictions:
+            #             np.append(row, prediction[idx])
+            #             # row.append(prediction)
+            #     return X
+            for idx, row in enumerate(X):
+                for prediction in predictions:
+                    np.append(row, prediction[idx])
+                    # row.append(prediction)
+            return X
+        else:
+            return predictions
 
 class PassThroughX(BaseEstimator, TransformerMixin):
 
@@ -833,4 +901,28 @@ class PassThroughX(BaseEstimator, TransformerMixin):
         return self
 
     def transform(self, X, y=None):
+        print('starting PassThroughX')
+        print(datetime.datetime.now())
         return X
+
+class DvWrapper(BaseEstimator, TransformerMixin):
+
+    def __init__(self, trained_dv=None, sparse=True):
+        self.trained_dv = trained_dv
+        self.sparse = sparse
+
+
+    def fit(self, X, y=None):
+        if self.trained_dv is None:
+            dv = DictVectorizer(sparse=self.sparse)
+            self.trained_dv = dv.fit(X)
+        return self
+
+
+    def transform(self, X, y=None):
+        return self.trained_dv.transform(X)
+
+
+    def get_feature_names(self):
+        return self.trained_dv.get_feature_names()
+
