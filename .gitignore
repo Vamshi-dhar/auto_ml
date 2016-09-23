@@ -17,3 +17,5 @@ venv/*
 xgboost/*
 .idea/
 *.lua
+*.pbz2
+*.pgz
