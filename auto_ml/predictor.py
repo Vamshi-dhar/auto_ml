@@ -1,4 +1,6 @@
+import bz2
 import datetime
+import gzip
 import math
 import os
 import sys
@@ -99,7 +101,7 @@ class Predictor(object):
             # pipeline_list.append(('pca', TruncatedSVD()))
             pipeline_list.append(('feature_selection', utils.FeatureSelectionTransformer(type_of_estimator=self.type_of_estimator, feature_selection_model='SelectFromModel') ))
 
-        if self.add_cluster_prediction or (self.compute_power >=10 and self.add_cluster_prediction is not False):
+        if self.add_cluster_prediction is True or (self.compute_power >= 10 and self.add_cluster_prediction is not False):
             pipeline_list.append(('add_cluster_prediction', utils.AddPredictedFeature(model_name='MiniBatchKMeans', type_of_estimator=self.type_of_estimator, include_original_X=True)))
 
         final_model = utils.get_model_from_name(model_name)
@@ -404,6 +406,7 @@ class Predictor(object):
             self.trained_pipeline = best_trained_gs.best_estimator_
 
         del self.X_test
+        del self.y_test
         del self.grid_search_pipelines
 
 
@@ -473,7 +476,6 @@ class Predictor(object):
                 pipeline_results = []
                 pipeline_results.append(gs.best_score_)
                 pipeline_results.append(gs)
-                self.grid_search_pipelines.append(pipeline_results)
 
             # The case where we just want to run the training straight through, not fitting GridSearchCV
             else:
@@ -505,11 +507,14 @@ class Predictor(object):
                 print(holdout_data_score)
 
                 try:
-                    pipeline_results.append(holdout_data_score)
+                    # We want our score on the holdout data to be the first thing in our pipeline results tuple. This is what we will be selecting our best model from.
+                    pipeline_results.prepend(holdout_data_score)
                 except:
                     # If we don't have pipeline_results (if we did not fit GSCV), then pass
                     pass
 
+            if self.fit_grid_search:
+                self.grid_search_pipelines.append(pipeline_results)
 
 
     def _get_xgb_feat_importances(self, clf):
@@ -678,9 +683,58 @@ class Predictor(object):
             return self.trained_pipeline.score(X_test, y_test)
 
 
-    def save(self, file_name='auto_ml_saved_pipeline.pkl', verbose=True):
-        with open(file_name, 'wb') as open_file_name:
+    def save(self, file_name='auto_ml_saved_pipeline.pbz2', verbose=True):
+        with bz2.BZ2File(file_name, 'wb') as open_file_name:
             pickle.dump(self.trained_pipeline, open_file_name, protocol=pickle.HIGHEST_PROTOCOL)
+
+        # auto_ml_saved_pipeline_pbz2_start_time = datetime.datetime.now()
+        # file_name='auto_ml_saved_pipeline.pbz2'
+        # with bz2.BZ2File(file_name, 'wb') as open_file_name:
+        #     pickle.dump(self.trained_pipeline, open_file_name, protocol=pickle.HIGHEST_PROTOCOL)
+        # auto_ml_saved_pipeline_pbz2_end_time = datetime.datetime.now()
+        # print('auto_ml_saved_pipeline.pbz2 total file write time')
+        # print(auto_ml_saved_pipeline_pbz2_end_time - auto_ml_saved_pipeline_pbz2_start_time)
+
+        # auto_ml_saved_pipeline_pgz_start_time = datetime.datetime.now()
+        # file_name='auto_ml_saved_pipeline.pgz'
+        # with gzip.GzipFile(file_name, 'wb') as open_file_name:
+        #     pickle.dump(self.trained_pipeline, open_file_name, protocol=pickle.HIGHEST_PROTOCOL)
+        # auto_ml_saved_pipeline_pgz_end_time = datetime.datetime.now()
+        # print('auto_ml_saved_pipeline.pgz total file write time')
+        # print(auto_ml_saved_pipeline_pgz_end_time - auto_ml_saved_pipeline_pgz_start_time)
+
+        # auto_ml_saved_pipeline_pkl_start_time = datetime.datetime.now()
+        # file_name='auto_ml_saved_pipeline.pkl'
+        # with open(file_name, 'wb') as open_file_name:
+        #     pickle.dump(self.trained_pipeline, open_file_name, protocol=pickle.HIGHEST_PROTOCOL)
+        # auto_ml_saved_pipeline_pkl_end_time = datetime.datetime.now()
+        # print('auto_ml_saved_pipeline.pkl total file write time')
+        # print(auto_ml_saved_pipeline_pkl_end_time - auto_ml_saved_pipeline_pkl_start_time)
+
+        # auto_ml_saved_pipeline_w_only_pbz2_start_time = datetime.datetime.now()
+        # file_name='auto_ml_saved_pipeline_w_only.pbz2'
+        # with bz2.BZ2File(file_name, 'w') as open_file_name:
+        #     pickle.dump(self.trained_pipeline, open_file_name, protocol=pickle.HIGHEST_PROTOCOL)
+        # auto_ml_saved_pipeline_w_only_pbz2_end_time = datetime.datetime.now()
+        # print('auto_ml_saved_pipeline_w_only.pbz2 total file write time')
+        # print(auto_ml_saved_pipeline_w_only_pbz2_end_time - auto_ml_saved_pipeline_w_only_pbz2_start_time)
+
+        # auto_ml_saved_pipeline_w_only_pgz_start_time = datetime.datetime.now()
+        # file_name='auto_ml_saved_pipeline_w_only.pgz'
+        # with gzip.GzipFile(file_name, 'w') as open_file_name:
+        #     pickle.dump(self.trained_pipeline, open_file_name, protocol=pickle.HIGHEST_PROTOCOL)
+        # auto_ml_saved_pipeline_w_only_pgz_end_time = datetime.datetime.now()
+        # print('auto_ml_saved_pipeline_w_only.pgz total file write time')
+        # print(auto_ml_saved_pipeline_w_only_pgz_end_time - auto_ml_saved_pipeline_w_only_pgz_start_time)
+
+        # auto_ml_saved_pipeline_w_only_pkl_start_time = datetime.datetime.now()
+        # file_name='auto_ml_saved_pipeline_w_only.pkl'
+        # with open(file_name, 'w') as open_file_name:
+        #     pickle.dump(self.trained_pipeline, open_file_name, protocol=pickle.HIGHEST_PROTOCOL)
+        # auto_ml_saved_pipeline_w_only_pkl_end_time = datetime.datetime.now()
+        # print('auto_ml_saved_pipeline_w_only.pkl total file write time')
+        # print(auto_ml_saved_pipeline_w_only_pkl_end_time - auto_ml_saved_pipeline_w_only_pkl_start_time)
+
 
         if verbose:
             print('\n\nWe have saved the trained pipeline to a filed called "auto_ml_saved_pipeline.pkl"')
