@@ -101,7 +101,10 @@ class Predictor(object):
         if perform_feature_scaling is True or (self.compute_power >= 7 and self.perform_feature_scaling is not False):
             master_pipeline_list.append(('scaler', utils.CustomSparseScaler(self.column_descriptions)))
 
-        master_pipeline_list.append(('dv', DictVectorizer(sparse=False, sort=True)))
+        # self.master_dv will be None until we have a master DictVectorizer trained
+        # Once we have a master DV trained, use that for all of our subpredictors and meta-estimator
+        # We can then modify this as needed while adding in new features, like predictions from subpredictors
+        master_pipeline_list.append(('dv', utils.DvWrapper(trained_dv=self.master_dv, sparse=False, sort=True)))
         if dv_only:
             return Pipeline(master_pipeline_list)
 
@@ -156,6 +159,8 @@ class Predictor(object):
             model_names = self._get_estimator_names()
 
         gs_params['final_model__model_name'] = model_names
+
+        gs_params['dv__trained_dv__vocabulary_'] = self.master_dv.vocabulary_
 
         if self.compute_power >= 7:
             gs_params['scaler__perform_feature_scaling'] = [True, False]
@@ -354,7 +359,7 @@ class Predictor(object):
 
         X, y = self._prepare_for_training(raw_training_data)
 
-        if self.dv is None:
+        if self.master_dv is None:
             self._train_master_dict_vectorizer(X)
 
         # print('To compare to our current predictions, we are only training our master ensemble on two thirds of the data')
@@ -405,9 +410,23 @@ class Predictor(object):
                 # 1. Now when we are fitting our ensembled pipeline, we will have all of the features available. This solves a number of headaches.
                 # 2. If we are running GridSearchCV on our ensembled pipeline, we will be saving a lot of duplicate calls to .predict for each subpredictor
             for subpredictor in self.subpredictors:
+                # Get the predictions from this subpredictor
                 predictions = subpredictor.predict(X_ensemble)
+                feature_name = subpredictor.output_column + '_sub_prediction'
+
+                # Add these predictions to each row
                 for idx, row in enumerate(X_ensemble):
-                    row[subpredictor.output_column + '_sub_prediction'] = predictions[idx]
+                    row[feature_name] = predictions[idx]
+
+                # Make sure our original master DictVectorizer knows how to handle these new features
+                # What we need it to do is to add these new features at the end of each array it produces
+                # Then, our FeatureSelection module will ignore them for our subpredictors, or include them (if they're useful) for our meta-estimator
+                # print('len(self.master_dv.vocabulary_)')
+                # print(len(self.master_dv.vocabulary_))
+                self.master_dv.vocabulary_[feature_name] = len(self.master_dv.vocabulary_)
+                self.master_dv.feature_names_.append(feature_name)
+                # print('self.master_dv.feature_names_')
+                # print(self.master_dv.feature_names_)
 
         if self.take_log_of_y:
             y = [math.log(val) for val in y]
@@ -478,7 +497,8 @@ class Predictor(object):
             # Only fit GridSearchCV if we actually have hyperparameters to optimize.
             # Oftentimes, we'll just want to train a pipeline using all the default values, or using the user-provided values.
             # In those cases, fitting GSCV is unnecessarily computationally expensive.
-            self.fit_grid_search = False
+            self.fit_grid_search = True
+            # self.fit_grid_search = False
             for key, val in self.grid_search_params.items():
 
                 # if it is a list, and has a length > 1, we will want to fit grid search
@@ -563,11 +583,17 @@ class Predictor(object):
     # This also allows us to do things like manually control how we handle new features, from say, subpredictors
     def _train_master_dict_vectorizer(self, X):
         dv_pipeline = self._construct_pipeline(dv_only=True)
-        print('dv_pipeline')
-        print(dv_pipeline)
-        self.master_dv = dv_pipeline.named_steps['dv']
-        print('self.master_dv')
+
+        dv_pipeline.fit(X)
+
+        self.master_dv = dv_pipeline.named_steps['dv'].trained_dv
+        print('Fitted the master_dv')
         print(self.master_dv)
+        print('self.master_dv.vocabulary_')
+        print(self.master_dv.vocabulary_)
+        # print('self.master_dv.feature_names_')
+        # print(self.master_dv.feature_names_)
+
 
     def _get_xgb_feat_importances(self, clf):
 
@@ -646,6 +672,7 @@ class Predictor(object):
         # Get all the feature names that were added by ensembled predictors of any type
         for step in self.trained_pipeline.named_steps:
             if step[:3] == 'add':
+                print('found an added feature name')
                 trained_feature_names = trained_feature_names + self.trained_pipeline.named_steps[step].added_feature_names_
 
         return trained_feature_names

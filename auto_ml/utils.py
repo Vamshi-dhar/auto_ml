@@ -9,13 +9,14 @@ import random
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.cluster import MiniBatchKMeans
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, ExtraTreesRegressor, AdaBoostRegressor, GradientBoostingRegressor, GradientBoostingClassifier
+from sklearn.feature_extraction import DictVectorizer
+from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.feature_selection import GenericUnivariateSelect, RFECV, SelectFromModel
 from sklearn.grid_search import GridSearchCV, RandomizedSearchCV
 from sklearn.linear_model import RandomizedLasso, RandomizedLogisticRegression, RANSACRegressor, LinearRegression, Ridge, Lasso, ElasticNet, LassoLars, OrthogonalMatchingPursuit, BayesianRidge, ARDRegression, SGDRegressor, PassiveAggressiveRegressor, LogisticRegression, RidgeClassifier, SGDClassifier, Perceptron, PassiveAggressiveClassifier
 from sklearn.metrics import mean_squared_error, make_scorer, brier_score_loss
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelBinarizer, OneHotEncoder
-from sklearn.feature_extraction.text import TfidfVectorizer
 import scipy
 
 # import xgboost as xgb
@@ -907,14 +908,23 @@ class PassThroughX(BaseEstimator, TransformerMixin):
 
 class DvWrapper(BaseEstimator, TransformerMixin):
 
-    def __init__(self, trained_dv=None, sparse=True):
+    def __init__(self, trained_dv=None, sparse=True, sort=True):
         self.trained_dv = trained_dv
+        print('trained_dv inside DvWrapper')
+        print(self.trained_dv)
+        print('.vocabulary_ inside DvWrapper')
+        try:
+            print(self.trained_dv.vocabulary_)
+        except Exception as e:
+            print('failed to print it')
+            print(e)
         self.sparse = sparse
+        self.sort = sort
 
 
     def fit(self, X, y=None):
         if self.trained_dv is None:
-            dv = DictVectorizer(sparse=self.sparse)
+            dv = DictVectorizer(sparse=self.sparse, sort=self.sort)
             self.trained_dv = dv.fit(X)
         return self
 
