@@ -76,6 +76,5 @@ class FeatureEngineer(BaseEstimator, TransformerMixin):
 
                     row_copy = self.extract_features(row_copy, date_val, date_col)
                     X_copy.append(row_copy)
-
         return X_copy
 

@@ -75,7 +75,7 @@ class Predictor(object):
             raise ValueError('In your column_descriptions, please make sure exactly one column has the value "output", which is the value we will be training models to predict.')
 
 
-    def _construct_pipeline(self, model_name='LogisticRegression', impute_missing_values=True, perform_feature_scaling=True):
+    def _construct_pipeline(self, model_name='LogisticRegression', impute_missing_values=True, perform_feature_scaling=True, dv_only=False):
 
         feature_union_list = []
         master_pipeline_list = []
@@ -90,37 +90,40 @@ class Predictor(object):
         primary_data_formatting_pipeline = []
 
         if self.user_input_func is not None:
-            primary_data_formatting_pipeline.append(('user_func', FunctionTransformer(func=self.user_input_func, pass_y=False, validate=False) ))
+            master_pipeline_list.append(('user_func', FunctionTransformer(func=self.user_input_func, pass_y=False, validate=False) ))
 
         if len(self.date_cols) > 0:
-            primary_data_formatting_pipeline.append(('date_feature_engineering', date_feature_engineering.FeatureEngineer(date_cols=self.date_cols)))
+            master_pipeline_list.append(('date_feature_engineering', date_feature_engineering.FeatureEngineer(date_cols=self.date_cols)))
 
         # These parts will be included no matter what.
-        primary_data_formatting_pipeline.append(('basic_transform', utils.BasicDataCleaning(column_descriptions=self.column_descriptions)))
+        master_pipeline_list.append(('basic_transform', utils.BasicDataCleaning(column_descriptions=self.column_descriptions)))
 
         if perform_feature_scaling is True or (self.compute_power >= 7 and self.perform_feature_scaling is not False):
-            primary_data_formatting_pipeline.append(('scaler', utils.CustomSparseScaler(self.column_descriptions)))
+            master_pipeline_list.append(('scaler', utils.CustomSparseScaler(self.column_descriptions)))
 
-        primary_data_formatting_pipeline.append(('dv', DictVectorizer(sparse=False, sort=True)))
+        master_pipeline_list.append(('dv', DictVectorizer(sparse=False, sort=True)))
+        if dv_only:
+            return Pipeline(master_pipeline_list)
 
         # This primary data formatting pipeline will form the first part of our feature union
-        master_pipeline_list.append(('data_formatting', Pipeline(primary_data_formatting_pipeline)))
+        # master_pipeline_list.append(('data_formatting', Pipeline(primary_data_formatting_pipeline)))
 
         # Each of our trained subpredictors will make a prediction in their own parallel branch of the FeatureUnion.
         # In this way, if we have 10 different subpredictors, instead of running them in series, we can run all of them at the same time.
         if len(self.subpredictors) > 0:
+            master_pipeline_list.append(('subpredictors', utils.MakeSubpredictorPredictions(trained_subpredictors=self.subpredictors)))
 
-            # In our FeatureUnion, we'll need to pass through all the base extracted features from this row
-            feature_union_list.append(('all_X', utils.PassThroughX()))
+            # # In our FeatureUnion, we'll need to pass through all the base extracted features from this row
+            # feature_union_list.append(('all_X', utils.PassThroughX()))
 
-            for subpredictor in self.subpredictors:
-                subpredictor_pipeline = []
-                subpredictor_pipeline.append(('sub_feature_selection', subpredictor.trained_pipeline.named_steps['feature_selection']))
-                subpredictor_pipeline.append(('subpredictor_predictor', subpredictor.trained_pipeline.named_steps['final_model']))
-                feature_union_list.append(('subpredictor', Pipeline(subpredictor_pipeline)))
+            # for subpredictor in self.subpredictors:
+            #     subpredictor_pipeline = []
+            #     subpredictor_pipeline.append(('sub_feature_selection', subpredictor.trained_pipeline.named_steps['feature_selection']))
+            #     subpredictor_pipeline.append(('subpredictor_predictor', subpredictor.trained_pipeline.named_steps['final_model']))
+            #     feature_union_list.append(('subpredictor', Pipeline(subpredictor_pipeline)))
 
-            # Our master_pipeline will now start with this feature union to get the complete set of available features
-            master_pipeline_list.append(('feature_extraction_union', FeatureUnion(feature_union_list, n_jobs=-1)))
+            # # Our master_pipeline will now start with this feature union to get the complete set of available features
+            # master_pipeline_list.append(('feature_extraction_union', FeatureUnion(feature_union_list, n_jobs=-1)))
 
         # Now that we've extracted all the features we might be interested in, select only the ones that prove useful
         if self.perform_feature_selection:
@@ -137,7 +140,6 @@ class Predictor(object):
         master_pipeline_list.append(('final_model', utils.FinalModelATC(model=final_model, model_name=model_name, type_of_estimator=self.type_of_estimator, ml_for_analytics=self.ml_for_analytics)))
 
         constructed_pipeline = Pipeline(master_pipeline_list)
-        print(constructed_pipeline)
         return constructed_pipeline
 
 
@@ -305,11 +307,12 @@ class Predictor(object):
             , model_names=sub_model_names
             , write_gs_param_results_to_file=False
             , optimize_final_model=self.optimize_final_model
+            , dv=self.master_dv
         )
         self.subpredictors[sub_idx] = ml_predictor
 
 
-    def train(self, raw_training_data, user_input_func=None, optimize_entire_pipeline=False, optimize_final_model=None, write_gs_param_results_to_file=True, perform_feature_selection=True, verbose=True, X_test=None, y_test=None, print_training_summary_to_viewer=True, ml_for_analytics=True, only_analytics=False, compute_power=3, take_log_of_y=None, model_names=None, add_cluster_prediction=None, num_weak_estimators=0):
+    def train(self, raw_training_data, user_input_func=None, optimize_entire_pipeline=False, optimize_final_model=None, write_gs_param_results_to_file=True, perform_feature_selection=True, verbose=True, X_test=None, y_test=None, print_training_summary_to_viewer=True, ml_for_analytics=True, only_analytics=False, compute_power=3, take_log_of_y=None, model_names=None, add_cluster_prediction=None, num_weak_estimators=0, dv=None):
 
         self.user_input_func = user_input_func
         self.optimize_final_model = optimize_final_model
@@ -327,6 +330,7 @@ class Predictor(object):
         self.add_cluster_prediction = add_cluster_prediction
         self.num_weak_estimators = num_weak_estimators
         self.model_names = model_names
+        self.master_dv = dv
 
         # Put in place the markers that will tell us later on to train up a subpredictor for this problem
         if self.num_weak_estimators > 0:
@@ -349,6 +353,9 @@ class Predictor(object):
             print('Welcome to auto_ml! We\'re about to go through and make sense of your data using machine learning')
 
         X, y = self._prepare_for_training(raw_training_data)
+
+        if self.dv is None:
+            self._train_master_dict_vectorizer(X)
 
         # print('To compare to our current predictions, we are only training our master ensemble on two thirds of the data')
         # X_ensemble, X_subpredictors, y_ensemble, y_subpredictors = train_test_split(X, y, test_size=0.33)
@@ -390,6 +397,17 @@ class Predictor(object):
                         row[sub_name] = y_subpredictors[row_idx]
 
                 self._train_subpredictor(sub_name, X_subpredictors, sub_idx, sub_model_names=sub_model_names, sub_ml_analytics=sub_ml_analytics, sub_compute_power=sub_compute_power)
+
+            # Now that we've trained all our subpredictors, use them to get predictions on our X_ensemble training data
+            # At prediction time, we will get predictions from these subpredictors on the fly using MakeSubpredictorPredictions
+            # But for training, we want to get predictions from each subpredictor for our remaining training data.
+            # This solves two things:
+                # 1. Now when we are fitting our ensembled pipeline, we will have all of the features available. This solves a number of headaches.
+                # 2. If we are running GridSearchCV on our ensembled pipeline, we will be saving a lot of duplicate calls to .predict for each subpredictor
+            for subpredictor in self.subpredictors:
+                predictions = subpredictor.predict(X_ensemble)
+                for idx, row in enumerate(X_ensemble):
+                    row[subpredictor.output_column + '_sub_prediction'] = predictions[idx]
 
         if self.take_log_of_y:
             y = [math.log(val) for val in y]
@@ -541,7 +559,15 @@ class Predictor(object):
                     # If we don't have pipeline_results (if we did not fit GSCV), then pass
                     pass
 
-
+    # We will train up one master DictVectorizer that will be shared amognst all our pipelines, since they're all ultimately working from different portions of the same dataset.
+    # This also allows us to do things like manually control how we handle new features, from say, subpredictors
+    def _train_master_dict_vectorizer(self, X):
+        dv_pipeline = self._construct_pipeline(dv_only=True)
+        print('dv_pipeline')
+        print(dv_pipeline)
+        self.master_dv = dv_pipeline.named_steps['dv']
+        print('self.master_dv')
+        print(self.master_dv)
 
     def _get_xgb_feat_importances(self, clf):
 
