@@ -1,5 +1,6 @@
 import csv
 import datetime
+import itertools
 import math
 import numpy as np
 import os
@@ -372,8 +373,8 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
 
         self.model = model
         self.model_name = model_name
-        self.X_train = X_train
-        self.y_train = y_train
+        # self.X_train = X_train
+        # self.y_train = y_train
         self.ml_for_analytics = ml_for_analytics
         self.type_of_estimator = type_of_estimator
 
@@ -588,14 +589,35 @@ class FeatureSelectionTransformer(BaseEstimator, TransformerMixin):
         else:
             self.selector.fit(X, y)
             self.support_mask = self.selector.get_support()
+
+        # Get a mask of which indices it is we want to keep
+        self.index_mask = [idx for idx, val in enumerate(self.support_mask) if val == True]
         return self
 
 
     def transform(self, X, y=None):
         if self.selector == 'KeepAll':
             return X
+
+        if scipy.sparse.issparse(X):
+            if X.getformat() == 'csr':
+                # convert to a csc (column) matrix, rather than a csr (row) matrix
+                X = X.tocsc()
+
+            # Slice that column matrix to only get the relevant columns that we already calculated in fit:
+            X = X[:, self.index_mask]
+
+            # convert back to a csr matrix
+            return X.tocsr()
+
+        # If this is a dense matrix:
         else:
-            return self.selector.transform(X)
+            pruned_X = [list(itertools.compress(row, self.support_mask)) for row in X]
+            print('pruned_X')
+            print(pruned_X)
+            return pruned_X
+            # return self.selector.transform(X)
+
 
 
 def rmse_scoring(estimator, X, y, took_log_of_y=False):
