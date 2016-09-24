@@ -611,10 +611,7 @@ class FeatureSelectionTransformer(BaseEstimator, TransformerMixin):
         # If this is a dense matrix:
         else:
             pruned_X = [list(itertools.compress(row, self.support_mask)) for row in X]
-            print('pruned_X')
-            print(pruned_X)
             return pruned_X
-            # return self.selector.transform(X)
 
 
 
