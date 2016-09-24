@@ -58,11 +58,12 @@ class FeatureEngineer(BaseEstimator, TransformerMixin):
             for key, val in row.items():
                 row_copy[key] = val
 
+            row_copy = {}
+            for k, v in row.items():
+                row_copy[k] = v
+
             for date_col in self.date_cols:
 
-                row_copy = {}
-                for k, v in row.items():
-                    row_copy[k] = v
 
                 date_val = row_copy.pop(date_col, False)
 
