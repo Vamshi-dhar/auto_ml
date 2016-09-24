@@ -49,6 +49,9 @@ class FeatureEngineer(BaseEstimator, TransformerMixin):
 
 
     def transform(self, X, y=None):
+        if isinstance(X, dict):
+            X = [X]
+
         X_copy = []
         for idx, row in enumerate(X):
             row_copy = {}
@@ -56,6 +59,11 @@ class FeatureEngineer(BaseEstimator, TransformerMixin):
                 row_copy[key] = val
 
             for date_col in self.date_cols:
+
+                row_copy = {}
+                for k, v in row.items():
+                    row_copy[k] = v
+
                 date_val = row_copy.pop(date_col, False)
 
                 # make sure this property exists for this row_copy
