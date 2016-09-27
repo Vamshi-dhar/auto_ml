@@ -26,22 +26,19 @@ def get_size(obj, seen=None):
     return size
 
 
-with bz2.BZ2File("auto_ml_saved_pipeline_large_file.pbz2", "rb") as read_file:
+with open("auto_ml_saved_pipeline.pkl", "rb") as read_file:
     trained_ml_pipeline = pickle.load(read_file)
-
-print('trained_ml_pipeline')
-print(trained_ml_pipeline)
 
 # Recursive function to find where the large items are
 def print_size_info(item, name=None):
 
-    if get_size(item) > 100000:
-        if name:
+    if get_size(item) > 10000:
+        if name is not None:
             print('the name of the item')
             print(name)
         print('the item itself')
         print(item)
-        print('the size of the item')
+        print('the size of the above item')
         print(get_size(item))
 
         if isinstance(item, dict):

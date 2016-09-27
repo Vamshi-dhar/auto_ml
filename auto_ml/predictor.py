@@ -474,6 +474,7 @@ class Predictor(object):
         del self.X_test
         del self.y_test
         del self.grid_search_pipelines
+        del self.trained_pipeline.named_steps['dv'].feature_names_
 
 
     def perform_grid_search_by_model_names(self, estimator_names, scoring, X, y):
@@ -736,10 +737,11 @@ class Predictor(object):
             return self.trained_pipeline.score(X_test, y_test)
 
 
-    def save(self, file_name='auto_ml_saved_pipeline.pbz2', verbose=True):
-        with bz2.BZ2File(file_name, 'wb') as open_file_name:
+    def save(self, file_name='auto_ml_saved_pipeline.pkl', verbose=True):
+        # with bz2.BZ2File(file_name, 'wb') as open_file_name:
+        #     pickle.dump(self.trained_pipeline, open_file_name, protocol=pickle.HIGHEST_PROTOCOL)
+        with open(file_name, 'wb') as open_file_name:
             pickle.dump(self.trained_pipeline, open_file_name, protocol=pickle.HIGHEST_PROTOCOL)
-
         # auto_ml_saved_pipeline_pbz2_start_time = datetime.datetime.now()
         # file_name='auto_ml_saved_pipeline.pbz2'
         # with bz2.BZ2File(file_name, 'wb') as open_file_name:
