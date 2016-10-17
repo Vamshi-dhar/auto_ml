@@ -646,7 +646,7 @@ class FeatureSelectionTransformer(BaseEstimator, TransformerMixin):
 
 
 
-def rmse_scoring(estimator, X, y, took_log_of_y=False):
+def rmse_scoring(estimator, X, y, took_log_of_y=False, advanced_scoring=False):
     if isinstance(estimator, GradientBoostingRegressor):
         X = X.toarray()
     predictions = estimator.predict(X)
