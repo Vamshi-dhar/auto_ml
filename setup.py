@@ -3,6 +3,10 @@ See:
 https://packaging.python.org/en/latest/distributing.html
 https://github.com/pypa/sampleproject
 
+# python setup.py sdist bdist_wheel
+# python setup.py register
+# twine upload dist/auto_ml-VERSION_NUMBER*
+
 Built using this blog post as well:
 https://hynek.me/articles/sharing-your-labor-of-love-pypi-quick-and-dirty/
 https://tom-christie.github.io/articles/pypi/
@@ -27,7 +31,7 @@ setup(
     # Versions should comply with PEP440.  For a discussion on single-sourcing
     # the version across setup.py and the project code, see
     # https://packaging.python.org/en/latest/single_source_version.html
-    version='1.1.1',
+    version='1.4',
 
     description='Automated machine learning for production and analytics',
     long_description=long_description,
@@ -69,7 +73,7 @@ setup(
     ],
 
     # What does your project relate to?
-    keywords=['machine learning', 'data science', 'automated machine learning', 'regressor', 'regressors', 'regression', 'classification', 'classifiers', 'classifier', 'estimators', 'predictors', 'XGBoost', 'Random Forest', 'sklearn', 'scikit-learn', 'analytics', 'analysts', 'coefficients', 'feature importances'],
+    keywords=['machine learning', 'data science', 'automated machine learning', 'regressor', 'regressors', 'regression', 'classification', 'classifiers', 'classifier', 'estimators', 'predictors', 'XGBoost', 'Random Forest', 'sklearn', 'scikit-learn', 'analytics', 'analysts', 'coefficients', 'feature importances' 'analytics', 'artificial intelligence', 'subpredictors', 'ensembling', 'stacking', 'blending', 'feature engineering', 'feature extraction', 'feature selection', 'production', 'pandas', 'dataframes', 'machinejs'],
 
     # You can just specify the packages manually here if your project is
     # simple. Or you can use find_packages().
@@ -83,7 +87,7 @@ setup(
     # your project is installed. For an analysis of "install_requires" vs pip's
     # requirements files see:
     # https://packaging.python.org/en/latest/requirements.html
-    install_requires=['scikit-learn', 'scipy'],
+    install_requires=['scikit-learn', 'scipy', 'pandas', 'pathos', 'python-dateutil'],
 
     # List additional groups of dependencies here (e.g. development
     # dependencies). You can install these using the following syntax,

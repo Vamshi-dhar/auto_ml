@@ -1,8 +1,8 @@
+from collections import OrderedDict
 import csv
 import datetime
 import itertools
 import math
-import numpy as np
 import os
 import random
 
@@ -15,24 +15,50 @@ from sklearn.linear_model import RandomizedLasso, RandomizedLogisticRegression, 
 from sklearn.metrics import mean_squared_error, make_scorer, brier_score_loss
 from sklearn.preprocessing import LabelBinarizer, OneHotEncoder
 from sklearn.feature_extraction.text import TfidfVectorizer
-import scipy
 
+import pandas as pd
+import pathos
+import scipy
 # import xgboost as xgb
 
-def split_output(X, output_column_name, verbose=False):
-    y = []
-    for row in X:
-        y.append(
-            row.pop(output_column_name, None)
-        )
 
-    if verbose:
-        print('Just to make sure that your y-values make sense, here are the first 100 sorted values:')
-        print(sorted(y)[:100])
-        print('And here are the final 100 sorted values:')
-        print(sorted(y)[-100:])
+# The easiest way to check against a bunch of different bad values is to convert whatever val we have into a string, then check it against a set containing the string representation of a bunch of bad values
+bad_vals_as_strings = set([str(float('nan')), str(float('inf')), str(float('-inf')), 'None', 'none', 'NaN', 'nan', 'NULL', 'null', '', 'inf', '-inf'])
 
-    return X, y
+# clean_val will try to turn a value into a float.
+# If it fails, it will attempt to strip commas and then attempt to turn it into a float again
+# Additionally, it will check to make sure the value is not in a set of bad vals (nan, None, inf, etc.)
+# This function will either return a clean value, or raise an error if we cannot turn the value into a float or the value is a bad val
+def clean_val(val):
+    if str(val) in bad_vals_as_strings:
+        raise(ValueError('clean_val failed'))
+    else:
+        try:
+            float_val = float(val)
+        except:
+            # This will throw a ValueError if it fails
+            # remove any commas in the string, and try to turn into a float again
+            cleaned_string = val.replace(',', '')
+            float_val = float(cleaned_string)
+        return float_val
+
+# Same as above, except this version returns float('nan') when it fails
+# This plays more nicely with df.apply, and assumes we will be handling nans appropriately when doing DataFrameVectorizer later.
+def clean_val_nan_version(val):
+    if str(val) in bad_vals_as_strings:
+        return float('nan')
+    else:
+        try:
+            float_val = float(val)
+        except:
+            # This will throw a ValueError if it fails
+            # remove any commas in the string, and try to turn into a float again
+            cleaned_string = val.replace(',', '')
+            try:
+                float_val = float(cleaned_string)
+            except:
+                return float('nan')
+        return float_val
 
 
 # Hyperparameter search spaces for each model
@@ -204,120 +230,123 @@ class BasicDataCleaning(BaseEstimator, TransformerMixin):
 
     def __init__(self, column_descriptions=None):
         self.column_descriptions = column_descriptions
-        self.vals_to_del = set([None, float('nan'), float('Inf')])
-        self.vals_to_ignore = set(['regressor', 'classifier', 'output', 'ignore'])
-        self.tfidfvec = TfidfVectorizer()
+        self.text_col_indicators = set(['text', 'nlp'])
+        self.tfidfvec = TfidfVectorizer(
+            # If we have any documents that cannot be decoded properly, just ignore them and keep going as planned with everything else
+            decode_error='ignore'
+            # Try to strip accents from characters. Using unicode is slightly slower but more comprehensive than 'ascii'
+            , strip_accents='unicode'
+            # Can also choose 'character', which will likely increase accuracy, at the cost of much more space, generally
+            , analyzer='word'
+            # Remove commonly found english words ('it', 'a', 'the') which do not typically contain much signal
+            , stop_words='english'
+            # Convert all characters to lowercase
+            , lowercase=True
+            # Only consider words that appear in fewer than max_df percent of all documents
+            # In this case, ignore all words that appear in 90% of all documents
+            , max_df=0.9
+            # Consider only the most frequently occurring 3000 words, after taking into account all the other filtering going on
+            , max_features=3000
+        )
 
-    def fit(self, X, y=None):
+    def fit(self, X_df, y=None):
 
+        # See if we should fit TfidfVectorizer or not
+        for key in X_df.columns:
+            col_desc = self.column_descriptions.get(key, False)
+            if col_desc in self.text_col_indicators:
+                    self.tfidfvec.fit(X_df[key])
 
-        inputflag=False
-        text_col_indicators = set(['text', 'nlp'])
-
-        #Condition check if there is text or nlp field only then do tfidf
-        #follow loop will be excuted only one time , must see if there is any other logic.
-        #currently this is needed becuase this is the only way to get to know if there is any senetence as inputs in columns
-        #TODO alternatively any option from config file would be helpful which will remove this following loop
-        for row in X:
-            for key, val in row.items():
-                column_desciption = self.column_descriptions.get(key)
-                if column_desciption in text_col_indicators:
-                    inputflag = True
-                    break
-
-        # must look at an alternate way of doing this
-        if inputflag:
-            corpus = []
-            for row in X:
-                for key, val in row.items():
-                    col_desc = self.column_descriptions.get(key)
-                    if col_desc in text_col_indicators:
-                            corpus.append(val)
-            self.tfidfvec.fit(corpus)
-            return self
-        else:
-            return self
+        return self
 
     def transform(self, X, y=None):
-        clean_X = []
-        deleted_values_sample = []
-        deleted_info = {}
-        text_col_indicators = set(['text', 'nlp'])
+        # Convert input to DataFrame if we were given a list of dictionaries
+        if isinstance(X, dict) or isinstance(X, list):
+            X = pd.DataFrame(X)
+
+        # All of these are values we will not want to keep for training this particular estimator or subpredictor
+        vals_to_drop = set(['ignore', 'output', 'regressor', 'classifier'])
+
+        # It is much more efficient to drop a bunch of columns at once, rather than one at a time
+        cols_to_drop = []
 
 
-        for row in X:
-            clean_row = {}
-            for key, val in row.items():
-                col_desc = self.column_descriptions.get(key)
+        for key in X.columns:
+            col_desc = self.column_descriptions.get(key)
+            if col_desc == 'categorical':
+                # We will handle categorical data later, one-hot-encoding it inside DataFrameVectorizer
+                pass
 
-                if col_desc == 'categorical':
-                    clean_row[key] = str(val)
-                elif col_desc in (None, 'continuous', 'numerical', 'float', 'int'):
-                    if val not in self.vals_to_del:
-                        clean_row[key] = float(val)
-                elif col_desc == 'date':
-                    clean_row = add_date_features(val, clean_row, key)
-                # if input column contains text, then in such a case calculated tfidf which if already fitted before transform
-                elif col_desc in text_col_indicators:
-                    #add keys as features and tfvector values as values into cleanrow dictionary object
-                    keys = self.tfidfvec.get_feature_names()
-                    tfvec = self.tfidfvec.transform([val]).toarray()
-                    for i in range(len(tfvec)):
-                        clean_row[keys[i]] = tfvec[0][i]
-                elif col_desc in self.vals_to_ignore:
-                    pass
-                else:
-                    # If we have gotten here, the value is not any that we recognize
-                    # This is most likely a typo that the user would want to be informed of, or a case while we're developing on auto_ml itself.
-                    # In either case, it's useful to log it.
-                    if len(deleted_values_sample) < 10:
-                        deleted_values_sample.append(row[key])
-                    deleted_info[key] = col_desc
+            elif col_desc in (None, 'continuous', 'numerical', 'float', 'int'):
+                # For all of our numerical columns, try to turn all of these values into floats
+                # This function handles commas inside strings that represent numbers, and returns nan if we cannot turn this value into a float. nans are ignored in DataFrameVectorizer
+                X[key] = X[key].apply(clean_val_nan_version)
+
+            elif col_desc == 'date':
+                X = add_date_features_df(X, key)
+
+            elif col_desc in self.text_col_indicators:
+
+                keys = self.tfidfvec.get_feature_names()
+
+                tfvec = self.tfidfvec.transform(X.loc[:,key].values).toarray()
+                #create sepearte dataframe and append next to each other along columns
+                textframe = pd.DataFrame(tfvec)
+                X = X.join(textframe)
+                #once the transformed datafrane is added , remove original text
+                X = X.drop(key, axis=1)
+
+            elif col_desc in vals_to_drop:
+                cols_to_drop.append(key)
+
+            else:
+                # If we have gotten here, the value is not any that we recognize
+                # This is most likely a typo that the user would want to be informed of, or a case while we're developing on auto_ml itself.
+                # In either case, it's useful to log it.
+                print('When transforming the data, we have encountered a value in column_descriptions that is not currently supported. The column has been dropped to allow the rest of the pipeline to run. Here\'s the name of the column:' )
+                print(key)
+                print('And here is the value for this column passed into column_descriptions:')
+                print(col_desc)
+
+        # Historically we've deleted columns here. However, we're moving this to DataFrameVectorizer as part of a broader effort to reduce duplicate computation
+        # if len(cols_to_drop) > 0:
+        #     X = X.drop(cols_to_drop, axis=1)
+
+        return X
 
 
-            clean_X.append(clean_row)
-
-        if len(deleted_values_sample) > 0:
-            print('When transforming the data, we have encountered some values in column_descriptions that are not currently supported. The values stored at these keys have been deleted to allow the rest of the pipeline to run. Here\'s some info about these columns:' )
-            print(deleted_info)
-            print('And some example values from these columns:')
-            print(deleted_values_sample)
-
-
-        return clean_X
-
-def add_date_features(date_val, row, date_col):
-
-    row[date_col + '_day_of_week'] = str(date_val.weekday())
-    row[date_col + '_hour'] = date_val.hour
-
-    minutes_into_day = date_val.hour * 60 + date_val.minute
-
-    if row[date_col + '_day_of_week'] in (5,6):
-        row[date_col + '_is_weekend'] = True
-    elif row[date_col + '_day_of_week'] == 4 and row[date_col + '_hour'] > 16:
-        row[date_col + '_is_weekend'] = True
+def minutes_into_day_parts(minutes_into_day):
+    if minutes_into_day < 6 * 60:
+        return 'late_night'
+    elif minutes_into_day < 10 * 60:
+        return 'morning'
+    elif minutes_into_day < 11.5 * 60:
+        return 'mid_morning'
+    elif minutes_into_day < 14 * 60:
+        return 'lunchtime'
+    elif minutes_into_day < 18 * 60:
+        return 'afternoon'
+    elif minutes_into_day < 20.5 * 60:
+        return 'dinnertime'
+    elif minutes_into_day < 23.5 * 60:
+        return 'early_night'
     else:
-        row[date_col + '_is_weekend'] = False
+        return 'late_night'
 
-        # Grab rush hour times for the weekdays.
-        # We are intentionally not grabbing them for the weekends, since weekend behavior is likely very different than weekday behavior.
-        if minutes_into_day < 120:
-            row[date_col + '_is_late_night'] = True
-        elif minutes_into_day < 11.5 * 60:
-            row[date_col + '_is_off_peak'] = True
-        elif minutes_into_day < 13.5 * 60:
-            row[date_col + '_is_lunch_rush_hour'] = True
-        elif minutes_into_day < 17.5 * 60:
-            row[date_col + '_is_off_peak'] = True
-        elif minutes_into_day < 20 * 60:
-            row[date_col + '_is_dinner_rush_hour'] = True
-        elif minutes_into_day < 22.5 * 60:
-            row[date_col + '_is_off_peak'] = True
-        else:
-            row[date_col + '_is_late_night'] = True
 
-    return row
+def add_date_features_df(df, date_col):
+
+    df[date_col + '_day_of_week'] = df[date_col].apply(lambda x: x.weekday()).astype(int)
+    df[date_col + '_hour'] = df[date_col].apply(lambda x: x.hour).astype(int)
+
+    df[date_col + '_minutes_into_day'] = df[date_col].apply(lambda x: x.hour * 60 + x.minute)
+
+    df[date_col + '_is_weekend'] = df[date_col].apply(lambda x: x.weekday() in (5,6))
+    df[date_col + '_day_part'] = df[date_col + '_minutes_into_day'].apply(minutes_into_day_parts)
+
+    df = df.drop([date_col], axis=1)
+
+    return df
 
 
 def get_model_from_name(model_name):
@@ -395,29 +424,6 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
 
         model_to_fit = get_model_from_name(self.model_name)
 
-        if self.ml_for_analytics:
-            self.feature_ranges = []
-
-            # Grab the ranges for each feature
-            if scipy.sparse.issparse(X_fit):
-                for col_idx in range(X_fit.shape[1]):
-                    col_vals = X_fit.getcol(col_idx).toarray()
-                    col_vals = sorted(col_vals)
-
-                    # if the entire range is 0 - 1, just append the entire range.
-                    # This works well for binary variables.
-                    # This will break when we do min-max normalization to the range of 0,1
-                    # TODO(PRESTON): check if all values are 0's and 1's, or if we have any values in between.
-                    if col_vals[0] == 0 and col_vals[-1] == 1:
-                        self.feature_ranges.append(1)
-                    else:
-                        twentieth_percentile = col_vals[int(len(col_vals) * 0.2)]
-                        eightieth_percentile = col_vals[int(len(col_vals) * 0.8)]
-
-                        self.feature_ranges.append(eightieth_percentile - twentieth_percentile)
-                    del col_vals
-
-
         self.model = get_model_from_name(self.model_name)
 
         self.model.fit(X_fit, y)
@@ -426,7 +432,6 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
 
 
     def score(self, X, y):
-
         # At the time of writing this, GradientBoosting does not support sparse matrices for predictions
         if self.model_name[:16] == 'GradientBoosting' and scipy.sparse.issparse(X):
             X = X.todense()
@@ -436,6 +441,7 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
                 return self._scorer(self, X, y)
             elif self.type_of_estimator == 'classifier':
                 return self._scorer(self, X, y)
+
 
         else:
             return self.model.score(X, y)
@@ -479,6 +485,31 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
             X_predict = X
 
         return self.model.predict(X_predict)
+
+
+def advanced_scoring_classifiers(probas, actuals):
+    print('Here is how our trained estimator does at each level of predicted probabilities')
+
+    # create summary dict
+    summary_dict = OrderedDict()
+    for num in range(0, 100, 10):
+        summary_dict[num] = []
+
+    for idx, proba in enumerate(probas):
+        proba = math.floor(int(proba * 100) / 10) * 10
+        summary_dict[proba].append(actuals[idx])
+
+    for k, v in summary_dict.items():
+        if len(v) > 0:
+            print('Predicted probability: ' + str(k) + '%')
+            actual = sum(v) * 1.0 / len(v)
+
+            # Format into a prettier number
+            actual = round(actual * 100, 0)
+            print('Actual: ' + str(actual) + '%')
+            print('# preds: ' + str(len(v)) + '\n')
+
+    print('\n\n')
 
 
 def write_gs_param_results_to_file(trained_gs, most_recent_filename):
@@ -626,105 +657,125 @@ def rmse_scoring(estimator, X, y, took_log_of_y=False):
     return - 1 * rmse
 
 
-def brier_score_loss_wrapper(estimator, X, y):
+def brier_score_loss_wrapper(estimator, X, y, advanced_scoring=False):
     if isinstance(estimator, GradientBoostingClassifier):
         X = X.toarray()
 
     predictions = estimator.predict_proba(X)
     probas = [row[1] for row in predictions]
     score = brier_score_loss(y, probas)
-    return -1 * score
-
-# Used for CustomSparseScaler
-def get_all_attribute_names(list_of_dictionaries, cols_to_avoid):
-    attribute_hash = {}
-    for dictionary in list_of_dictionaries:
-        for k, v in dictionary.items():
-            attribute_hash[k] = True
-
-    # All of the columns in column_descriptions should be avoided. They're probably either categorical or NLP data, both of which cannot be scaled.
-
-    attribute_list = [k for k, v in attribute_hash.items() if k not in cols_to_avoid]
-    return attribute_list
+    if advanced_scoring:
+        return (-1 * score, probas)
+    else:
+        return -1 * score
 
 
-# Scale sparse data to the 90th and 10th percentile
+# Used in CustomSparseScaler
+def calculate_scaling_ranges(X, col, min_percentile=0.05, max_percentile=0.95):
+
+    series_vals = X[col]
+    good_vals_indexes = series_vals.notnull()
+
+    series_vals = list(series_vals[good_vals_indexes])
+    series_vals = sorted(series_vals)
+
+    max_val_idx = int(max_percentile * len(series_vals)) - 1
+    min_val_idx = int(min_percentile * len(series_vals))
+
+    if len(series_vals) > 0:
+        max_val = series_vals[max_val_idx]
+        min_val = series_vals[min_val_idx]
+    else:
+        print('This column appears to have only nan values, and will be ignored:')
+        print(col)
+        return 'ignore'
+
+    inner_range = max_val - min_val
+
+    if inner_range == 0:
+        # Used to do recursion here, which is prettier and uses less code, but since we've already got the filtered and sorted series_vals, it makes sense to use those to avoid duplicate computation
+        # Grab the absolute largest max and min vals, and see if there is any difference in them, since our 95th and 5th percentile vals had no difference between them
+        max_val = series_vals[len(series_vals) - 1]
+        min_val = series_vals[0]
+        inner_range = max_val - min_val
+
+        if inner_range == 0:
+            # If this is a binary field, keep all the values in it, just make sure they're scaled to 1 or 0.
+            if max_val == 1:
+                min_val = 0
+                inner_range = 1
+            else:
+                # If this is just a column that holds all the same values for everything though, delete the column to save some space
+                print('This column appears to have 0 variance (the max and min values are the same), and will be ignored:')
+                print(col)
+                return 'ignore'
+
+    col_summary = {
+        'max_val': max_val
+        , 'min_val': min_val
+        , 'inner_range': inner_range
+    }
+
+    return col_summary
+
+# Scale sparse data to the 95th and 5th percentile
 # Only do so for values that actuall exist (do absolutely nothing with rows that do not have this data point)
 class CustomSparseScaler(BaseEstimator, TransformerMixin):
 
 
     def __init__(self, column_descriptions, truncate_large_values=False, perform_feature_scaling=True):
         self.column_descriptions = column_descriptions
-        self.cols_to_avoid = set([k for k, v in column_descriptions.items()])
+
+        self.numeric_col_descs = set([None, 'continuous', 'numerical', 'numeric', 'float', 'int'])
+        # Everything in column_descriptions (except numeric_col_descs) is a non-numeric column, and thus, cannot be scaled
+        self.cols_to_avoid = set([k for k, v in column_descriptions.items() if v not in self.numeric_col_descs])
+
+        # Setting these here so that they can be grid searchable
+        # Truncating large values is an interesting strategy. It forces all values to fit inside the 5th - 95th percentiles.
+        # Essentially, it turns any really large (or small) values into reasonably large (or small) values.
         self.truncate_large_values = truncate_large_values
         self.perform_feature_scaling = perform_feature_scaling
 
 
     def fit(self, X, y=None):
+        self.column_ranges = {}
+        self.cols_to_ignore = []
+
         if self.perform_feature_scaling:
-            attribute_list = get_all_attribute_names(X, self.column_descriptions)
 
-            attributes_per_round = [[], [], []]
-
-            attributes_summary = {}
-
-            # Randomly assign each attribute to one of three buckets
-            # We will summarize the data in three separate iterations, to avoid duplicating too much data in memory at any one point.
-            for attribute in attribute_list:
-                bucket_idx = int(random.random() * 3)
-                attributes_per_round[bucket_idx].append(attribute)
-                attributes_summary[attribute] = []
-
-            for bucket in attributes_per_round:
-
-                attributes_to_summarize = set(bucket)
-
-                for row in X:
-                    for k, v in row.items():
-                        if k in attributes_to_summarize:
-                            attributes_summary[k].append(v)
-
-                for attribute in bucket:
-
-                    # Sort our collected data for that column
-                    attributes_summary[attribute].sort()
-                    col_vals = attributes_summary[attribute]
-                    tenth_percentile = col_vals[int(0.05 * len(col_vals))]
-                    ninetieth_percentile = col_vals[int(0.95 * len(col_vals))]
-
-                    # It's probably not a great idea to pass in as continuous data a column that has 0 variation from it's 10th to it's 90th percentiles, but we'll protect against it here regardless
-                    col_range = ninetieth_percentile - tenth_percentile
-                    if col_range > 0:
-                        attributes_summary[attribute] = [tenth_percentile, ninetieth_percentile, ninetieth_percentile - tenth_percentile]
+            for col in X.columns:
+                if col not in self.cols_to_avoid:
+                    col_summary = calculate_scaling_ranges(X, col, min_percentile=0.05, max_percentile=0.95)
+                    if col_summary == 'ignore':
+                        self.cols_to_ignore.append(col)
                     else:
-                        del attributes_summary[attribute]
-                        self.cols_to_avoid.add(attribute)
-
-                    del col_vals
-
-            self.attributes_summary = attributes_summary
+                        self.column_ranges[col] = col_summary
 
         return self
 
 
     # Perform basic min/max scaling, with the minor caveat that our min and max values are the 10th and 90th percentile values, to avoid outliers.
     def transform(self, X, y=None):
-        if self.perform_feature_scaling:
-            for row in X:
-                for k, v in row.items():
-                    if k not in self.cols_to_avoid and self.attributes_summary.get(k, False):
-                        min_val = self.attributes_summary[k][0]
-                        max_val = self.attributes_summary[k][1]
-                        attribute_range = self.attributes_summary[k][2]
-                        scaled_value = (v - min_val) / attribute_range
-                        if self.truncate_large_values:
-                            if scaled_value < 0:
-                                scaled_value = 0
-                            elif scaled_value > 1:
-                                scaled_value = 1
-                        row[k] = scaled_value
+        if len(self.cols_to_ignore) > 0:
+            X = X.drop(self.cols_to_ignore, axis=1)
+
+        for col, col_dict in self.column_ranges.items():
+            min_val = col_dict['min_val']
+            inner_range = col_dict['inner_range']
+            X[col] = X[col].apply(lambda x: scale_val(x, min_val, inner_range, self.perform_feature_scaling))
 
         return X
+
+
+def scale_val(val, min_val, total_range, truncate_large_values=False):
+    scaled_value = (val - min_val) / total_range
+    if truncate_large_values:
+        if scaled_value < 0:
+            scaled_value = 0
+        elif scaled_value > 1:
+            scaled_value = 1
+
+    return scaled_value
 
 
 class AddPredictedFeature(BaseEstimator, TransformerMixin):
@@ -795,33 +846,48 @@ class AddSubpredictorPredictions(BaseEstimator, TransformerMixin):
 
 
     def transform(self, X, y=None):
-        if isinstance(X, dict):
-            X = [X]
+        if isinstance(X, dict) or isinstance(X, list):
+            X = pd.DataFrame(X)
         predictions = []
-        for predictor in self.trained_subpredictors:
 
-            if predictor.named_steps['final_model'].type_of_estimator == 'regressor':
-                predictions.append(predictor.predict(X))
+        if X.shape[0] > 100:
+            pool = pathos.multiprocessing.ProcessPool()
 
-            else:
-                predictions.append(predictor.predict(X))
-
-        if self.include_original_X:
-            X_copy = []
-            for row_idx, row in enumerate(X):
-
-                row_copy = {}
-                for k, v in row.items():
-                    row_copy[k] = v
-
-                for pred_idx, name in enumerate(self.sub_names):
-
-                    row_copy[name + '_sub_prediction'] = predictions[pred_idx][row_idx]
-
-                X_copy.append(row_copy)
-
-            return X_copy
+            # Since we may have already closed the pool, try to restart it
+            try:
+                pool.restart()
+            except AssertionError as e:
+                pass
+            predictions = pool.map(lambda predictor: predictor.predict(X), self.trained_subpredictors)
+            # Once we have gotten all we need from the pool, close it so it's not taking up unnecessary memory
+            pool.close()
+            pool.join()
 
         else:
+            for predictor in self.trained_subpredictors:
+
+                if predictor.named_steps['final_model'].type_of_estimator == 'regressor':
+                    predictions.append(predictor.predict(X))
+
+                else:
+                    predictions.append(predictor.predict(X))
+
+        if self.include_original_X:
+            for pred_idx, name in enumerate(self.sub_names):
+                X[name + '_sub_prediction'] = predictions[pred_idx]
+            return X
+
+        else:
+            # TODO: Might need to refactor this to take into account that we're using DataFrames now, not a list of lists, where each sublist is a column of predictions
+            pool.close()
+            pool.join()
             return predictions
 
+def safely_drop_columns(df, cols_to_drop):
+    safe_cols_to_drop = []
+    for col in cols_to_drop:
+        if col in df.columns:
+            safe_cols_to_drop.append(col)
+
+    df = df.drop(safe_cols_to_drop, axis=1)
+    return df
