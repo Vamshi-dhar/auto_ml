@@ -261,7 +261,9 @@ class BasicDataCleaning(BaseEstimator, TransformerMixin):
 
     def transform(self, X, y=None):
         # Convert input to DataFrame if we were given a list of dictionaries
-        if isinstance(X, dict) or isinstance(X, list):
+        # if isinstance(X, dict):
+        #     X = pd.DataFrame(X, index=[0])
+        if isinstance(X, list):
             X = pd.DataFrame(X)
 
         # All of these are values we will not want to keep for training this particular estimator or subpredictor
@@ -270,43 +272,55 @@ class BasicDataCleaning(BaseEstimator, TransformerMixin):
         # It is much more efficient to drop a bunch of columns at once, rather than one at a time
         cols_to_drop = []
 
+        if isinstance(X, dict):
+            for key, val in X.items():
+                col_desc = self.column_descriptions.get(key)
 
-        for key in X.columns:
-            col_desc = self.column_descriptions.get(key)
-            if col_desc == 'categorical':
-                # We will handle categorical data later, one-hot-encoding it inside DataFrameVectorizer
-                pass
+                if col_desc in (None, 'continuous', 'numerical', 'float', 'int'):
+                    X[key] = clean_val_nan_version(val)
+                elif col_desc == 'date':
+                    X = add_date_features_dict(X, key)
+                elif col_desc in vals_to_drop:
+                    del X[key]
 
-            elif col_desc in (None, 'continuous', 'numerical', 'float', 'int'):
-                # For all of our numerical columns, try to turn all of these values into floats
-                # This function handles commas inside strings that represent numbers, and returns nan if we cannot turn this value into a float. nans are ignored in DataFrameVectorizer
-                X[key] = X[key].apply(clean_val_nan_version)
 
-            elif col_desc == 'date':
-                X = add_date_features_df(X, key)
+        else:
+            for key in X.columns:
+                col_desc = self.column_descriptions.get(key)
+                if col_desc == 'categorical':
+                    # We will handle categorical data later, one-hot-encoding it inside DataFrameVectorizer
+                    pass
 
-            elif col_desc in self.text_col_indicators:
+                elif col_desc in (None, 'continuous', 'numerical', 'float', 'int'):
+                    # For all of our numerical columns, try to turn all of these values into floats
+                    # This function handles commas inside strings that represent numbers, and returns nan if we cannot turn this value into a float. nans are ignored in DataFrameVectorizer
+                    X[key] = X[key].apply(clean_val_nan_version)
 
-                keys = self.tfidfvec.get_feature_names()
+                elif col_desc == 'date':
+                    X = add_date_features_df(X, key)
 
-                tfvec = self.tfidfvec.transform(X.loc[:,key].values).toarray()
-                #create sepearte dataframe and append next to each other along columns
-                textframe = pd.DataFrame(tfvec)
-                X = X.join(textframe)
-                #once the transformed datafrane is added , remove original text
-                X = X.drop(key, axis=1)
+                elif col_desc in self.text_col_indicators:
 
-            elif col_desc in vals_to_drop:
-                cols_to_drop.append(key)
+                    keys = self.tfidfvec.get_feature_names()
 
-            else:
-                # If we have gotten here, the value is not any that we recognize
-                # This is most likely a typo that the user would want to be informed of, or a case while we're developing on auto_ml itself.
-                # In either case, it's useful to log it.
-                print('When transforming the data, we have encountered a value in column_descriptions that is not currently supported. The column has been dropped to allow the rest of the pipeline to run. Here\'s the name of the column:' )
-                print(key)
-                print('And here is the value for this column passed into column_descriptions:')
-                print(col_desc)
+                    tfvec = self.tfidfvec.transform(X.loc[:,key].values).toarray()
+                    #create sepearte dataframe and append next to each other along columns
+                    textframe = pd.DataFrame(tfvec)
+                    X = X.join(textframe)
+                    #once the transformed datafrane is added , remove original text
+                    X = X.drop(key, axis=1)
+
+                elif col_desc in vals_to_drop:
+                    cols_to_drop.append(key)
+
+                else:
+                    # If we have gotten here, the value is not any that we recognize
+                    # This is most likely a typo that the user would want to be informed of, or a case while we're developing on auto_ml itself.
+                    # In either case, it's useful to log it.
+                    print('When transforming the data, we have encountered a value in column_descriptions that is not currently supported. The column has been dropped to allow the rest of the pipeline to run. Here\'s the name of the column:' )
+                    print(key)
+                    print('And here is the value for this column passed into column_descriptions:')
+                    print(col_desc)
 
         # Historically we've deleted columns here. However, we're moving this to DataFrameVectorizer as part of a broader effort to reduce duplicate computation
         # if len(cols_to_drop) > 0:
@@ -347,6 +361,21 @@ def add_date_features_df(df, date_col):
     df = df.drop([date_col], axis=1)
 
     return df
+
+
+def add_date_features_dict(row, date_col):
+
+    row[date_col + '_day_of_week'] = row[date_col].weekday()
+    row[date_col + '_hour'] = row[date_col].hour
+
+    row[date_col + '_minutes_into_day'] = row[date_col].hour * 60 + row[date_col].minute
+
+    row[date_col + '_is_weekend'] = row[date_col].weekday() in (5,6)
+    row[date_col + '_day_part'] = minutes_into_day_parts(row[date_col + '_minutes_into_day'])
+
+    del row[date_col]
+
+    return row
 
 
 def get_model_from_name(model_name):
@@ -484,7 +513,11 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
         else:
             X_predict = X
 
-        return self.model.predict(X_predict)
+        prediction = self.model.predict(X_predict)
+        if len(prediction) == 1:
+            return prediction[0]
+        else:
+            return prediction
 
 
 def advanced_scoring_classifiers(probas, actuals):
@@ -756,13 +789,22 @@ class CustomSparseScaler(BaseEstimator, TransformerMixin):
 
     # Perform basic min/max scaling, with the minor caveat that our min and max values are the 10th and 90th percentile values, to avoid outliers.
     def transform(self, X, y=None):
-        if len(self.cols_to_ignore) > 0:
-            X = X.drop(self.cols_to_ignore, axis=1)
 
-        for col, col_dict in self.column_ranges.items():
-            min_val = col_dict['min_val']
-            inner_range = col_dict['inner_range']
-            X[col] = X[col].apply(lambda x: scale_val(x, min_val, inner_range, self.perform_feature_scaling))
+        if isinstance(X, dict):
+            for col, col_dict in self.column_ranges.items():
+                if col in X:
+                    X[col] = scale_val(val=X[col], min_val=col_dict['min_val'], total_range=col_dict['inner_range'], truncate_large_values=self.truncate_large_values)
+        else:
+
+            if len(self.cols_to_ignore) > 0:
+                X = safely_drop_columns(X, self.cols_to_ignore)
+                # X = X.drop(self.cols_to_ignore, axis=1)
+
+            for col, col_dict in self.column_ranges.items():
+                if col in X.columns:
+                    min_val = col_dict['min_val']
+                    inner_range = col_dict['inner_range']
+                    X[col] = X[col].apply(lambda x: scale_val(x, min_val, inner_range, self.truncate_large_values))
 
         return X
 
@@ -846,7 +888,9 @@ class AddSubpredictorPredictions(BaseEstimator, TransformerMixin):
 
 
     def transform(self, X, y=None):
-        if isinstance(X, dict) or isinstance(X, list):
+        if isinstance(X, dict):
+            X = pd.DataFrame(X, index=[0])
+        elif isinstance(X, list):
             X = pd.DataFrame(X)
         predictions = []
 
