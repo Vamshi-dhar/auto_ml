@@ -18,7 +18,7 @@ bad_vals_as_strings = set([str(float('nan')), str(float('inf')), str(float('-inf
 class DataFrameVectorizer(BaseEstimator, TransformerMixin):
     """Transforms a DataFrame to vectors.
 
-    Just like scikit-learn's DictVectorizer, but adjusted to take a DataFrame as input, instead of a list of dictionaries. 
+    Just like scikit-learn's DictVectorizer, but adjusted to take a DataFrame as input, instead of a list of dictionaries.
 
     This transformer turns a DataFrame into Numpy arrays or scipy.sparse matrices for use
     with scikit-learn estimators.
@@ -97,10 +97,10 @@ class DataFrameVectorizer(BaseEstimator, TransformerMixin):
         vocab = {}
 
         for col_name in X.columns:
-            # Ignore 'ignore', 'output', etc. 
+            # Ignore 'ignore', 'output', etc.
             if self.column_descriptions.get(col_name, False) not in self.vals_to_drop:
                 if X[col_name].dtype == 'object' or self.column_descriptions.get(col_name, False) == 'categorical':
-                    # If this is a categorical column, or the dtype continues to be object, iterate through each row to get all the possible values that we are one-hot-encoding. 
+                    # If this is a categorical column, or the dtype continues to be object, iterate through each row to get all the possible values that we are one-hot-encoding.
                     for val in X[col_name]:
                         feature_name = col_name + self.separator + str(val)
                         if feature_name not in vocab:
@@ -108,10 +108,10 @@ class DataFrameVectorizer(BaseEstimator, TransformerMixin):
                             vocab[feature_name] = len(vocab)
                 # Ideally we shouldn't have to check for for duplicate columns, but in case we're passed a DataFrame with duplicate columns, consolidate down to a single column. Maybe not the ideal solution, but solves a class of bugs, and puts the reasonable onus on the user to not pass in two data columns with different meanings but the same column name
                 # And of course, if this is a categorical column, do not include the column name itself, just include the feature_names as calculated above
-                elif col_name not in vocab:  
+                elif col_name not in vocab:
                     feature_names.append(col_name)
                     vocab[col_name] = len(vocab)
-                
+
         if self.sort:
             feature_names.sort()
             vocab = dict((f, i) for i, f in enumerate(feature_names))
@@ -143,17 +143,13 @@ class DataFrameVectorizer(BaseEstimator, TransformerMixin):
         # would require (heuristic) conversion of dtype to typecode...
         values = []
 
-        # collect all the possible feature names and build sparse matrix at
-        # same time
-        for row_idx, row in X.iterrows():
-            for col_idx, val in enumerate(row):
-                f = X.columns[col_idx]
 
+        if isinstance(X, dict):
+            for f, val in X.items():
                 if isinstance(val, six.string_types):
                     f = f + self.separator + val
                     val = 1
 
-                # Only include this in our output if it was part of our training data. Silently ignore it otherwise.
                 if f in vocab and str(val) not in bad_vals_as_strings:
                     # Get the index position from vocab, then append that index position to indices
                     indices.append(vocab[f])
@@ -162,8 +158,32 @@ class DataFrameVectorizer(BaseEstimator, TransformerMixin):
 
             indptr.append(len(indices))
 
-        if len(indptr) == 1:
-            raise ValueError('The DataFrame passed into DataFrameVectorizer is empty')
+            if len(indptr) == 1:
+                raise ValueError('The dictionary passed into DataFrameVectorizer is empty')
+
+
+        else:
+            # collect all the possible feature names and build sparse matrix at
+            # same time
+            for row_idx, row in X.iterrows():
+                for col_idx, val in enumerate(row):
+                    f = X.columns[col_idx]
+
+                    if isinstance(val, six.string_types):
+                        f = f + self.separator + val
+                        val = 1
+
+                    # Only include this in our output if it was part of our training data. Silently ignore it otherwise.
+                    if f in vocab and str(val) not in bad_vals_as_strings:
+                        # Get the index position from vocab, then append that index position to indices
+                        indices.append(vocab[f])
+                        # Convert the val to the correct dtype, then append to our values list
+                        values.append(dtype(val))
+
+                indptr.append(len(indices))
+
+            if len(indptr) == 1:
+                raise ValueError('The DataFrame passed into DataFrameVectorizer is empty')
 
         indices = frombuffer_empty(indices, dtype=np.intc)
         indptr = np.frombuffer(indptr, dtype=np.intc)
