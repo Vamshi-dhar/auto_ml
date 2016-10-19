@@ -630,9 +630,9 @@ def get_feature_selection_model_from_name(type_of_estimator, model_name):
 class FeatureSelectionTransformer(BaseEstimator, TransformerMixin):
 
 
-    def __init__(self, type_of_estimator, feature_selection_model='SelectFromModel'):
+    def __init__(self, type_of_estimator, column_descriptions, feature_selection_model='SelectFromModel'):
 
-
+        self.column_descriptions = column_descriptions
         self.type_of_estimator = type_of_estimator
         self.feature_selection_model = feature_selection_model
 
@@ -658,6 +658,7 @@ class FeatureSelectionTransformer(BaseEstimator, TransformerMixin):
 
 
     def transform(self, X, y=None):
+
         if self.selector == 'KeepAll':
             return X
 
@@ -902,7 +903,7 @@ class AddSubpredictorPredictions(BaseEstimator, TransformerMixin):
                 pool.restart()
             except AssertionError as e:
                 pass
-            predictions = pool.map(lambda predictor: predictor.predict(X), self.trained_subpredictors)
+            predictions = list(pool.uimap(lambda predictor: predictor.predict(X), self.trained_subpredictors))
             # Once we have gotten all we need from the pool, close it so it's not taking up unnecessary memory
             pool.close()
             pool.join()
@@ -923,8 +924,6 @@ class AddSubpredictorPredictions(BaseEstimator, TransformerMixin):
 
         else:
             # TODO: Might need to refactor this to take into account that we're using DataFrames now, not a list of lists, where each sublist is a column of predictions
-            pool.close()
-            pool.join()
             return predictions
 
 def safely_drop_columns(df, cols_to_drop):
