@@ -16,6 +16,7 @@ from sklearn.metrics import mean_squared_error, make_scorer, brier_score_loss
 from sklearn.preprocessing import LabelBinarizer, OneHotEncoder
 from sklearn.feature_extraction.text import TfidfVectorizer
 
+import dateutil.parser
 import pandas as pd
 import pathos
 import scipy
@@ -273,15 +274,22 @@ class BasicDataCleaning(BaseEstimator, TransformerMixin):
         cols_to_drop = []
 
         if isinstance(X, dict):
+
+            dict_copy = {}
+
             for key, val in X.items():
                 col_desc = self.column_descriptions.get(key)
 
                 if col_desc in (None, 'continuous', 'numerical', 'float', 'int'):
-                    X[key] = clean_val_nan_version(val)
+                    dict_copy[key] = clean_val_nan_version(val)
                 elif col_desc == 'date':
-                    X = add_date_features_dict(X, key)
+                    date_feature_dict = add_date_features_dict(X, key)
+                    dict_copy.update(date_feature_dict)
+                elif col_desc == 'categorical':
+                    dict_copy[key] = val
                 elif col_desc in vals_to_drop:
-                    del X[key]
+                    pass
+                    # del X[key]
 
 
         else:
@@ -347,7 +355,7 @@ def minutes_into_day_parts(minutes_into_day):
     else:
         return 'late_night'
 
-
+# Note: assumes that the column is already formatted as a pandas date type
 def add_date_features_df(df, date_col):
 
     df[date_col + '_day_of_week'] = df[date_col].apply(lambda x: x.weekday()).astype(int)
@@ -365,17 +373,24 @@ def add_date_features_df(df, date_col):
 
 def add_date_features_dict(row, date_col):
 
-    row[date_col + '_day_of_week'] = row[date_col].weekday()
-    row[date_col + '_hour'] = row[date_col].hour
+    # Make a copy of all the engineered features from the date, without modifying the original object at all
+    # This way the same original object can be passed into a number of different trained auto_ml predictors
+    date_feature_dict = {}
+    date_val = row[date_col]
 
-    row[date_col + '_minutes_into_day'] = row[date_col].hour * 60 + row[date_col].minute
+    if not isinstance(date_val, (datetime.datetime, datetime.date)):
+        date_val = dateutil.parser.parse(date_val)
 
-    row[date_col + '_is_weekend'] = row[date_col].weekday() in (5,6)
-    row[date_col + '_day_part'] = minutes_into_day_parts(row[date_col + '_minutes_into_day'])
+    date_feature_dict[date_col + '_day_of_week'] = date_val.weekday()
+    date_feature_dict[date_col + '_hour'] = date_val.hour
 
-    del row[date_col]
+    date_feature_dict[date_col + '_minutes_into_day'] = date_val.hour * 60 + date_val.minute
 
-    return row
+    date_feature_dict[date_col + '_is_weekend'] = date_val.weekday() in (5,6)
+
+    # del row[date_col]
+
+    return date_feature_dict
 
 
 def get_model_from_name(model_name):
