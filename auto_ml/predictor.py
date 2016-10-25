@@ -98,7 +98,7 @@ class Predictor(object):
                 raise ValueError('We are not sure how to process this column of data: ' + str(value) + '. Please pass in "output", "categorical", "date", or for more advances subpredictor ensembling, "regressor" or "classifier"')
         if found_output_column is False:
             print('Here is the column_descriptions that was passed in:')
-            print(column_descriptions)
+            print(self.column_descriptions)
             raise ValueError('In your column_descriptions, please make sure exactly one column has the value "output", which is the value we will be training models to predict.')
 
         # We will be adding one new categorical variable for each date col
