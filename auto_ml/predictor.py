@@ -163,7 +163,7 @@ class Predictor(object):
         if trained_pipeline is not None:
             pipeline_list.append(('dv', trained_pipeline.named_steps['dv']))
         else:
-            pipeline_list.append(('dv', DataFrameVectorizer.DataFrameVectorizer(sparse=False, sort=True, column_descriptions=self.column_descriptions)))
+            pipeline_list.append(('dv', DataFrameVectorizer.DataFrameVectorizer(sparse=True, sort=True, column_descriptions=self.column_descriptions)))
 
 
         if self.perform_feature_selection:
@@ -264,6 +264,9 @@ class Predictor(object):
             print('We will remove these values, and continue with training on the cleaned dataset')
         X_df = X_df.dropna(subset=[self.output_column])
 
+        # See if we have a date_column
+        if len(self.date_cols) > 0 and not self._is_subpredictor:
+            X_df = X_df.sort_values(by=self.date_cols[0])
 
         # Remove the output column from the dataset, and store it into the y varaible
         y = list(X_df.pop(self.output_column))
@@ -493,6 +496,8 @@ class Predictor(object):
             # X_df = X_df.drop(self.cols_to_ignore, axis=1)
 
         X_df, y = self._prepare_for_training(X_df)
+        self.X_df = X_df
+        self.y = y
 
         # Once we have removed the applicable y-values, look into creating any subpredictors we might need
         if len(self.subpredictors) > 0:
@@ -503,7 +508,16 @@ class Predictor(object):
             # However, this means we'll have to train our subpredictors on a different dataset than we train our larger ensemble predictor on.
             # X_ensemble is the X data we'll be using to train our ensemble (the bulk of our data), and y_ensemble is, of course, the relevant y data for training our ensemble.
             # X_subpredictors is the smaller subset of data we'll be using to train our subpredictors on. y_subpredictors doesn't make any sense- it's the y values for our ensemble, but split to mirror the data we're using to train our subpredictors. Thus, we'll ignore it.
-            self.X_ensemble, self.X_subpredictors, self.y_ensemble, self.y_subpredictors = train_test_split(X_df, y, test_size=0.33)
+            total_training_length = len(X_df)
+
+            subpredictor_percentage = 0.33
+            subpredictor_split_idx = int(total_training_length * subpredictor_percentage)
+            self.X_subpredictors = X_df[:subpredictor_split_idx]
+            self.y_subpredictors = y[:subpredictor_split_idx]
+            self.X_ensemble = X_df[subpredictor_split_idx:]
+            self.y_ensemble = y[subpredictor_split_idx:]
+
+            # self.X_ensemble, self.X_subpredictors, self.y_ensemble, self.y_subpredictors = train_test_split(X_df, y, test_size=0.33)
             X_df = self.X_ensemble
             y = self.y_ensemble
 
@@ -575,6 +589,8 @@ class Predictor(object):
         del self.y_test
         del self.grid_search_pipelines
         del self.subpredictors
+        del self.X_ensemble
+        del self.y_ensemble
         del X_df
 
 
