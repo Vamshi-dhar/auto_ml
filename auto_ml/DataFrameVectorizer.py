@@ -70,7 +70,7 @@ class DataFrameVectorizer(BaseEstimator, TransformerMixin):
       encoded as columns of integers.
     """
 
-    def __init__(self, column_descriptions=None, dtype=np.float64, separator="=", sparse=True, sort=True):
+    def __init__(self, column_descriptions=None, dtype=np.float32, separator="=", sparse=True, sort=True):
         self.dtype = dtype
         self.separator = separator
         self.sparse = sparse
