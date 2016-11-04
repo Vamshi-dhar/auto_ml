@@ -2,9 +2,15 @@ from collections import OrderedDict
 import csv
 import datetime
 import itertools
+import dateutil
 import math
 import os
 import random
+
+# from keras.constraints import maxnorm
+# from keras.layers import Dense, Dropout
+# from keras.models import Sequential
+# from keras.wrappers.scikit_learn import KerasRegressor, KerasClassifier
 
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.cluster import MiniBatchKMeans
@@ -12,15 +18,31 @@ from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, Extr
 from sklearn.feature_selection import GenericUnivariateSelect, RFECV, SelectFromModel
 from sklearn.grid_search import GridSearchCV, RandomizedSearchCV
 from sklearn.linear_model import RandomizedLasso, RandomizedLogisticRegression, RANSACRegressor, LinearRegression, Ridge, Lasso, ElasticNet, LassoLars, OrthogonalMatchingPursuit, BayesianRidge, ARDRegression, SGDRegressor, PassiveAggressiveRegressor, LogisticRegression, RidgeClassifier, SGDClassifier, Perceptron, PassiveAggressiveClassifier
-from sklearn.metrics import mean_squared_error, make_scorer, brier_score_loss
+from sklearn.metrics import mean_squared_error, make_scorer, brier_score_loss, accuracy_score, explained_variance_score, mean_absolute_error, median_absolute_error, r2_score
 from sklearn.preprocessing import LabelBinarizer, OneHotEncoder
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-import dateutil.parser
+import numpy as np
 import pandas as pd
 import pathos
 import scipy
-# import xgboost as xgb
+
+# XGBoost can be a pain to install. It's also a super powerful and effective package.
+# So we'll make it optional here. If a user wants to install XGBoost themselves, we fully support XGBoost!
+# But, if they just want to get running out of the gate, without dealing with any installation other than what's done for them automatically, we won't force them to go through that.
+# The same logic will apply to deep learning with Keras and TensorFlow
+global xgb_installed
+xgb_installed = False
+try:
+    import xgboost as xgb
+    xgb_installed = True
+except NameError:
+    pass
+except ImportError:
+    pass
+
+if xgb_installed:
+    import xgboost as xgb
 
 
 # The easiest way to check against a bunch of different bad values is to convert whatever val we have into a string, then check it against a set containing the string representation of a bunch of bad values
@@ -65,12 +87,20 @@ def clean_val_nan_version(val):
 # Hyperparameter search spaces for each model
 def get_search_params(model_name):
     grid_search_params = {
-
+        # 'DeepLearningRegressor': {
+        #     # 'shape': ['triangle_left', 'triangle_right', 'triangle_cuddles', 'long', 'long_and_wide', 'standard']
+        #     'dropout_rate': [0.0, 0.2, 0.4, 0.6, 0.8]
+        #     , 'weight_constraint': [0, 1, 3, 5]
+        #     , 'optimizer': ['SGD', 'RMSprop', 'Adagrad', 'Adadelta', 'Adam', 'Adamax', 'Nadam']
+        # },
         'XGBClassifier': {
-            'max_depth': [1, 3, 8, 25],
-            # 'learning_rate': [0.01, 0.1, 0.25, 0.4, 0.7],
-            'subsample': [0.5, 1.0]
-            # 'subsample': [0.4, 0.5, 0.58, 0.63, 0.68, 0.76]
+            'max_depth': [1, 3, 5, 10],
+            'learning_rate': [0.01, 0.1, 0.2],
+            'min_child_weight': [1, 5, 10],
+            # 'subsample': [0.5, 1.0]
+            'subsample': [0.5, 0.8, 1.0],
+            'colsample_bytree': [0.5, 0.8, 1.0]
+            # 'lambda': [0.9, 1.0]
         },
         'XGBRegressor': {
             # Add in max_delta_step if classes are extremely imbalanced
@@ -85,17 +115,18 @@ def get_search_params(model_name):
         },
         'GradientBoostingRegressor': {
             # Add in max_delta_step if classes are extremely imbalanced
-            'max_depth': [1, 3, 8, 25],
+            'max_depth': [1, 2, 3, 5],
             'max_features': ['sqrt', 'log2', None],
             # 'loss': ['ls', 'lad', 'huber', 'quantile']
             # 'booster': ['gbtree', 'gblinear', 'dart'],
-            'loss': ['ls', 'lad', 'huber'],
+            # 'loss': ['ls', 'lad', 'huber'],
+            'loss': ['ls', 'huber'],
             # 'learning_rate': [0.01, 0.1, 0.25, 0.4, 0.7],
-            'subsample': [0.5, 1.0]
+            'subsample': [0.5, 0.8, 1.0]
         },
         'GradientBoostingClassifier': {
             'loss': ['deviance', 'exponential'],
-            'max_depth': [1, 3, 8, 25],
+            'max_depth': [1, 2, 3, 5],
             'max_features': ['sqrt', 'log2', None],
             # 'learning_rate': [0.01, 0.1, 0.25, 0.4, 0.7],
             'subsample': [0.5, 1.0]
@@ -232,42 +263,45 @@ class BasicDataCleaning(BaseEstimator, TransformerMixin):
     def __init__(self, column_descriptions=None):
         self.column_descriptions = column_descriptions
         self.text_col_indicators = set(['text', 'nlp'])
-        self.tfidfvec = TfidfVectorizer(
-            # If we have any documents that cannot be decoded properly, just ignore them and keep going as planned with everything else
-            decode_error='ignore'
-            # Try to strip accents from characters. Using unicode is slightly slower but more comprehensive than 'ascii'
-            , strip_accents='unicode'
-            # Can also choose 'character', which will likely increase accuracy, at the cost of much more space, generally
-            , analyzer='word'
-            # Remove commonly found english words ('it', 'a', 'the') which do not typically contain much signal
-            , stop_words='english'
-            # Convert all characters to lowercase
-            , lowercase=True
-            # Only consider words that appear in fewer than max_df percent of all documents
-            # In this case, ignore all words that appear in 90% of all documents
-            , max_df=0.9
-            # Consider only the most frequently occurring 3000 words, after taking into account all the other filtering going on
-            , max_features=3000
-        )
+
+        self.text_columns = {}
+        for key, val in self.column_descriptions.items():
+            if val in self.text_col_indicators:
+                self.text_columns[key] = TfidfVectorizer(
+                    # If we have any documents that cannot be decoded properly, just ignore them and keep going as planned with everything else
+                    decode_error='ignore'
+                    # Try to strip accents from characters. Using unicode is slightly slower but more comprehensive than 'ascii'
+                    , strip_accents='unicode'
+                    # Can also choose 'character', which will likely increase accuracy, at the cost of much more space, generally
+                    , analyzer='word'
+                    # Remove commonly found english words ('it', 'a', 'the') which do not typically contain much signal
+                    , stop_words='english'
+                    # Convert all characters to lowercase
+                    , lowercase=True
+                    # Only consider words that appear in fewer than max_df percent of all documents
+                    # In this case, ignore all words that appear in 90% of all documents
+                    , max_df=0.9
+                    # Consider only the most frequently occurring 3000 words, after taking into account all the other filtering going on
+                    , max_features=3000
+                )
 
     def fit(self, X_df, y=None):
 
         # See if we should fit TfidfVectorizer or not
         for key in X_df.columns:
-            col_desc = self.column_descriptions.get(key, False)
-            if col_desc in self.text_col_indicators:
-                    self.tfidfvec.fit(X_df[key])
+            # col_desc = self.column_descriptions.get(key, False)
+            if key in self.text_columns:
+                    self.text_columns[key].fit(X_df[key])
 
         return self
 
     def transform(self, X, y=None):
         # Convert input to DataFrame if we were given a list of dictionaries
-        # if isinstance(X, dict):
-        #     X = pd.DataFrame(X, index=[0])
         if isinstance(X, list):
             X = pd.DataFrame(X)
 
-        # All of these are values we will not want to keep for training this particular estimator or subpredictor
+        # All of these are values we will not want to keep for training this particular estimator.
+        # Note that we have already split out the output column and saved it into it's own variable
         vals_to_drop = set(['ignore', 'output', 'regressor', 'classifier'])
 
         # It is much more efficient to drop a bunch of columns at once, rather than one at a time
@@ -287,10 +321,11 @@ class BasicDataCleaning(BaseEstimator, TransformerMixin):
                     dict_copy.update(date_feature_dict)
                 elif col_desc == 'categorical':
                     dict_copy[key] = val
+                # elif key in self.text_columns:
+                    # Add in logic to handle nlp columns here
                 elif col_desc in vals_to_drop:
                     pass
                     # del X[key]
-
 
         else:
             for key in X.columns:
@@ -307,15 +342,28 @@ class BasicDataCleaning(BaseEstimator, TransformerMixin):
                 elif col_desc == 'date':
                     X = add_date_features_df(X, key)
 
-                elif col_desc in self.text_col_indicators:
+                elif key in self.text_columns:
 
-                    keys = self.tfidfvec.get_feature_names()
+                    col_names = self.text_columns[key].get_feature_names()
 
-                    tfvec = self.tfidfvec.transform(X.loc[:,key].values).toarray()
-                    #create sepearte dataframe and append next to each other along columns
-                    textframe = pd.DataFrame(tfvec)
-                    X = X.join(textframe)
-                    #once the transformed datafrane is added , remove original text
+                    # Make weird characters play nice, or just ignore them :)
+                    for idx, word in enumerate(col_names):
+                        try:
+                            col_names[idx] = str(word)
+                        except:
+                            col_names[idx] = 'non_ascii_word_' + str(idx)
+
+                    col_names = ['nlp_' + key + '_' + str(word) for word in col_names]
+
+                    nlp_matrix = self.text_columns[key].transform(X[key].values)
+                    nlp_matrix = nlp_matrix.toarray()
+
+                    text_df = pd.DataFrame(nlp_matrix)
+                    text_df.columns = col_names
+
+                    X = X.join(text_df)
+                    # Once the transformed datafrane is added, remove the original text
+
                     X = X.drop(key, axis=1)
 
                 elif col_desc in vals_to_drop:
@@ -333,7 +381,6 @@ class BasicDataCleaning(BaseEstimator, TransformerMixin):
         # Historically we've deleted columns here. However, we're moving this to DataFrameVectorizer as part of a broader effort to reduce duplicate computation
         # if len(cols_to_drop) > 0:
         #     X = X.drop(cols_to_drop, axis=1)
-
         return X
 
 
@@ -357,7 +404,11 @@ def minutes_into_day_parts(minutes_into_day):
 
 # Note: assumes that the column is already formatted as a pandas date type
 def add_date_features_df(df, date_col):
+    # Pandas nicely tries to prevent you from doing stupid things, like setting values on a copy of a df, not your real one
+    # However, it's a bit overzealous in this case, so we'll side-step a bunch of warnings by setting is_copy to false here
+    df.is_copy = False
 
+    df[date_col] = pd.to_datetime(df[date_col])
     df[date_col + '_day_of_week'] = df[date_col].apply(lambda x: x.weekday()).astype(int)
     df[date_col + '_hour'] = df[date_col].apply(lambda x: x.hour).astype(int)
 
@@ -369,6 +420,55 @@ def add_date_features_df(df, date_col):
     df = df.drop([date_col], axis=1)
 
     return df
+
+# Same logic as above, except implemented for a single dictionary, which is much faster at prediction time when getting just a single prediction
+def add_date_features_dict(row, date_col):
+
+    date_feature_dict = {}
+
+    # Handle cases where the val for the date_col is None
+    try:
+        date_val = row[date_col]
+        if date_val == None:
+            return date_feature_dict
+        if not isinstance(date_val, (datetime.datetime, datetime.date)):
+            date_val = dateutil.parser.parse(date_val)
+    except:
+        return date_feature_dict
+
+    # Make a copy of all the engineered features from the date, without modifying the original object at all
+    # This way the same original object can be passed into a number of different trained auto_ml predictors
+
+
+    date_feature_dict[date_col + '_day_of_week'] = date_val.weekday()
+    date_feature_dict[date_col + '_hour'] = date_val.hour
+
+    date_feature_dict[date_col + '_minutes_into_day'] = date_val.hour * 60 + date_val.minute
+
+    date_feature_dict[date_col + '_is_weekend'] = date_val.weekday() in (5,6)
+
+    # del row[date_col]
+
+    return date_feature_dict
+
+
+# TODO: figure out later on how to wrap this inside another wrapper or something to make num_cols more dynamic
+# def make_deep_learning_model(num_cols=250, optimizer='adam', dropout_rate=0.2, weight_constraint=0, shape='standard'):
+#     model = Sequential()
+#     # Add a dense hidden layer, with num_nodes = num_cols, and telling it that the incoming input dimensions also = num_cols
+#     model.add(Dense(num_cols, input_dim=num_cols, activation='relu', init='normal', W_constraint=maxnorm(weight_constraint)))
+#     model.add(Dropout(dropout_rate))
+#     model.add(Dense(num_cols, activation='relu', init='normal', W_constraint=maxnorm(weight_constraint)))
+#     model.add(Dense(num_cols, activation='relu', init='normal', W_constraint=maxnorm(weight_constraint)))
+#     # For regressors, we want an output layer with a single node
+#     # For classifiers, we'll want to add in some other processing here (like a softmax activation function)
+#     model.add(Dense(1, init='normal'))
+
+#     # The final step is to compile the model
+#     # TODO: see if we can pass in our own custom loss function here
+#     model.compile(loss='mean_squared_error', optimizer=optimizer)
+
+#     return model
 
 
 def add_date_features_dict(row, date_col):
@@ -399,7 +499,6 @@ def get_model_from_name(model_name):
         'LogisticRegression': LogisticRegression(n_jobs=-2),
         'RandomForestClassifier': RandomForestClassifier(n_jobs=-2),
         'RidgeClassifier': RidgeClassifier(),
-        # 'XGBClassifier': xgb.XGBClassifier(),
         'GradientBoostingClassifier': GradientBoostingClassifier(),
 
         'SGDClassifier': SGDClassifier(n_jobs=-1),
@@ -407,10 +506,10 @@ def get_model_from_name(model_name):
         'PassiveAggressiveClassifier': PassiveAggressiveClassifier(),
 
         # Regressors
+        # 'DeepLearningRegressor': KerasRegressor(build_fn=make_deep_learning_model, nb_epoch=10, batch_size=10, verbose=1),
         'LinearRegression': LinearRegression(n_jobs=-2),
         'RandomForestRegressor': RandomForestRegressor(n_jobs=-2),
         'Ridge': Ridge(),
-        # 'XGBRegressor': xgb.XGBRegressor(),
         'ExtraTreesRegressor': ExtraTreesRegressor(n_jobs=-1),
         'AdaBoostRegressor': AdaBoostRegressor(n_estimators=5),
         'RANSACRegressor': RANSACRegressor(),
@@ -428,6 +527,10 @@ def get_model_from_name(model_name):
         # Clustering
         'MiniBatchKMeans': MiniBatchKMeans(n_clusters=8)
     }
+    if xgb_installed:
+        model_map['XGBClassifier'] = xgb.XGBClassifier(colsample_bytree=0.8, min_child_weight=5, max_depth=1, subsample=1.0, learning_rate=0.1)
+        model_map['XGBRegressor'] = xgb.XGBRegressor()
+
     return model_map[model_name]
 
 
@@ -435,6 +538,13 @@ def get_model_from_name(model_name):
 # In short, it wraps all the methods the pipeline will look for (fit, score, predict, predict_proba, etc.)
 # However, it also gives us the ability to optimize this stage in conjunction with the rest of the pipeline.
 # It also gives us more granular control over things like turning the input for GradientBoosting into dense matrices, or appending a set of dummy 1's to the end of sparse matrices getting predictions from XGBoost.
+# TODO: make sure we can actually get the params from GridSearchCV.
+    # Might have to do something tricky, like have a hold-all function that does nothing but get the params from GridSearchCV inside __init__
+        # So, self.model might just be a dictionary or something
+        # Or, a function that takes in anything as kwargs, and sets them on a dictionary, then returns that dictionary
+    # And then that function does nothing but return those params
+    # And we create a model using that inside fit
+
 class FinalModelATC(BaseEstimator, TransformerMixin):
 
 
@@ -446,9 +556,7 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
         # self.y_train = y_train
         self.ml_for_analytics = ml_for_analytics
         self.type_of_estimator = type_of_estimator
-        # This is purely a placeholder so we can set it if we have to if this is a subpredictor
-        # In that case, we will set it after the whole pipeline has trained and we are abbreviating the subpredictor pipeline
-        self.output_column = output_column
+
 
         if self.type_of_estimator == 'classifier':
             self._scorer = brier_score_loss_wrapper
@@ -466,9 +574,25 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
         else:
             X_fit = X
 
-        model_to_fit = get_model_from_name(self.model_name)
 
-        self.model = get_model_from_name(self.model_name)
+        # if self.model_name[:12] == 'DeepLearning':
+        #     if scipy.sparse.issparse(X_fit):
+        #         X_fit = X_fit.todense()
+
+        #     num_cols = X_fit.shape[1]
+        #     kwargs = {
+        #         'num_cols':num_cols
+        #         , 'nb_epoch': 20
+        #         , 'batch_size': 10
+        #         , 'verbose': 1
+        #     }
+        #     model_params = self.model.get_params()
+        #     del model_params['build_fn']
+        #     for k, v in model_params.items():
+        #         if k not in kwargs:
+        #             kwargs[k] = v
+        #     if self.type_of_estimator == 'regressor':
+        #         self.model = KerasRegressor(build_fn=make_deep_learning_model, **kwargs)
 
         self.model.fit(X_fit, y)
 
@@ -504,7 +628,7 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
         try:
             return self.model.predict_proba(X)
         except AttributeError:
-            print('This model has no predict_proba method. Returning results of .predict instead.')
+            # print('This model has no predict_proba method. Returning results of .predict instead.')
             raw_predictions = self.model.predict(X)
             tupled_predictions = []
             for prediction in raw_predictions:
@@ -522,13 +646,15 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
             # Trying to force XGBoost to play nice with sparse matrices
             X_predict = scipy.sparse.hstack((X, ones))
 
-        elif self.model_name[:16] == 'GradientBoosting' and scipy.sparse.issparse(X):
+        elif (self.model_name[:16] == 'GradientBoosting' or self.model_name[:12] == 'DeepLearning') and scipy.sparse.issparse(X):
             X_predict = X.todense()
 
         else:
             X_predict = X
 
         prediction = self.model.predict(X_predict)
+        # Handle cases of getting a prediction for a single item.
+        # It makes a cleaner interface just to get just the single prediction back, rather than a list with the prediction hidden inside.
         if len(prediction) == 1:
             return prediction[0]
         else:
@@ -536,11 +662,25 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
 
 
 def advanced_scoring_classifiers(probas, actuals):
-    print('Here is how our trained estimator does at each level of predicted probabilities')
+
+    print('Here is our brier-score-loss, which is the value we optimized for while training, and is the value returned from .score()')
+    print('It is a measure of how close the PROBABILITY predictions are.')
+    print(brier_score_loss(actuals, probas))
+
+    print('\nHere is the trained estimator\'s overall accuracy (when it predicts a label, how frequently is that the correct label?)')
+    predicted_labels = []
+    for pred in probas:
+        if pred >= 0.5:
+            predicted_labels.append(1)
+        else:
+            predicted_labels.append(0)
+    print(accuracy_score(y_true=actuals, y_pred=predicted_labels))
+
+    print('Here is the accuracy of our trained estimator at each level of predicted probabilities')
 
     # create summary dict
     summary_dict = OrderedDict()
-    for num in range(0, 100, 10):
+    for num in range(0, 110, 10):
         summary_dict[num] = []
 
     for idx, proba in enumerate(probas):
@@ -558,6 +698,93 @@ def advanced_scoring_classifiers(probas, actuals):
             print('# preds: ' + str(len(v)) + '\n')
 
     print('\n\n')
+
+def calculate_and_print_differences(predictions, actuals):
+    pos_differences = []
+    neg_differences = []
+    # Technically, we're ignoring cases where we are spot on
+    for idx, pred in enumerate(predictions):
+        difference = pred - actuals[idx]
+        if difference > 0:
+            pos_differences.append(difference)
+        elif difference < 0:
+            neg_differences.append(difference)
+    print('Count of positive differences (prediction > actual):')
+    print(len(pos_differences))
+    print('Count of negative differences:')
+    print(len(neg_differences))
+    print('Average positive difference:')
+    print(sum(pos_differences) * 1.0 / len(pos_differences))
+    print('Average negative difference:')
+    print(sum(neg_differences) * 1.0 / len(neg_differences))
+    print('count predictions > 10 min off')
+    ten_min_off = [x for x in neg_differences if x < -10 * 60]
+    print(len(ten_min_off))
+    print('average amount off by for these cases')
+    print(sum(ten_min_off) * 1.0 / len(ten_min_off))
+
+
+def advanced_scoring_regressors(predictions, actuals):
+
+    print('\n\n***********************************************')
+    print('Advanced scoring metrics for the trained regression model on this particular dataset:\n')
+
+    # 1. overall RMSE
+    print('Here is the overall RMSE for these predictions:')
+    print(mean_squared_error(actuals, predictions)**0.5)
+
+    # 2. overall avg predictions
+    print('\nHere is the average of the predictions:')
+    print(sum(predictions) * 1.0 / len(predictions))
+
+    # 3. overall avg actuals
+    print('\nHere is the average actual value on this validation set:')
+    print(sum(actuals) * 1.0 / len(actuals))
+
+    # 4. avg differences (not RMSE)
+    print('\nHere is the mean absolute error:')
+    print(mean_absolute_error(actuals, predictions))
+
+    print('\nHere is the median absolute error (robust to outliers):')
+    print(median_absolute_error(actuals, predictions))
+
+    print('\nHere is the explained variance:')
+    print(explained_variance_score(actuals, predictions))
+
+    print('\nHere is the R-squared value:')
+    print(r2_score(actuals, predictions))
+
+    # 5. pos and neg differences
+    calculate_and_print_differences(predictions, actuals)
+    # 6.
+
+    actuals_preds = zip(actuals, predictions)
+    # Sort by PREDICTED value, since this is what what we will know at the time we make a prediction
+    actuals_preds.sort(key=lambda pair: pair[1])
+    actuals_sorted = [act for act, pred in actuals_preds]
+    predictions_sorted = [pred for act, pred in actuals_preds]
+
+    print('Here\'s how the trained predictor did on each successive decile (ten percent chunk) of the predictions:')
+    for i in range(1,10):
+        print('\n**************')
+        print('Bucket number:')
+        print(i)
+        # There's probably some fenceposting error here
+        min_idx = int((i - 1) / 10.0 * len(actuals_sorted))
+        max_idx = int(i / 10.0 * len(actuals_sorted))
+        actuals_for_this_decile = actuals_sorted[min_idx:max_idx]
+        predictions_for_this_decile = predictions_sorted[min_idx:max_idx]
+
+        print('Avg predicted val in this bucket')
+        print(sum(predictions_for_this_decile) * 1.0 / len(predictions_for_this_decile))
+        print('Avg actual val in this bucket')
+        print(sum(actuals_for_this_decile) * 1.0 / len(actuals_for_this_decile))
+        print('RMSE for this bucket')
+        print(mean_squared_error(actuals_for_this_decile, predictions_for_this_decile)**0.5)
+        calculate_and_print_differences(predictions_for_this_decile, actuals_for_this_decile)
+
+    print('')
+    print('\n***********************************************\n\n')
 
 
 def write_gs_param_results_to_file(trained_gs, most_recent_filename):
@@ -631,7 +858,7 @@ def get_feature_selection_model_from_name(type_of_estimator, model_name):
             'KeepAll': 'KeepAll'
         },
         'regressor': {
-            'SelectFromModel': SelectFromModel(RandomForestRegressor(n_jobs=-1)),
+            'SelectFromModel': SelectFromModel(RandomForestRegressor(n_jobs=-1, max_depth=10, n_estimators=15), threshold='0.5*mean'),
             'RFECV': RFECV(estimator=RandomForestRegressor(n_jobs=-1), step=0.1),
             'GenericUnivariateSelect': GenericUnivariateSelect(),
             'RandomizedSparse': RandomizedLasso(),
@@ -694,7 +921,6 @@ class FeatureSelectionTransformer(BaseEstimator, TransformerMixin):
             return pruned_X
 
 
-
 def rmse_scoring(estimator, X, y, took_log_of_y=False, advanced_scoring=False):
     if isinstance(estimator, GradientBoostingRegressor):
         X = X.toarray()
@@ -703,13 +929,22 @@ def rmse_scoring(estimator, X, y, took_log_of_y=False, advanced_scoring=False):
         for idx, val in enumerate(predictions):
             predictions[idx] = math.exp(val)
     rmse = mean_squared_error(y, predictions)**0.5
+    if advanced_scoring == True:
+        advanced_scoring_regressors(predictions, y)
     return - 1 * rmse
 
 
 def brier_score_loss_wrapper(estimator, X, y, advanced_scoring=False):
     if isinstance(estimator, GradientBoostingClassifier):
         X = X.toarray()
-
+    clean_ys = []
+    # try:
+    for val in y:
+        val = int(val)
+        clean_ys.append(val)
+    y = clean_ys
+    # except:
+    #     pass
     predictions = estimator.predict_proba(X)
     probas = [row[1] for row in predictions]
     score = brier_score_loss(y, probas)
@@ -735,8 +970,8 @@ def calculate_scaling_ranges(X, col, min_percentile=0.05, max_percentile=0.95):
         max_val = series_vals[max_val_idx]
         min_val = series_vals[min_val_idx]
     else:
-        print('This column appears to have only nan values, and will be ignored:')
-        print(col)
+        # print('This column appears to have only nan values, and will be ignored:')
+        # print(col)
         return 'ignore'
 
     inner_range = max_val - min_val
@@ -755,8 +990,8 @@ def calculate_scaling_ranges(X, col, min_percentile=0.05, max_percentile=0.95):
                 inner_range = 1
             else:
                 # If this is just a column that holds all the same values for everything though, delete the column to save some space
-                print('This column appears to have 0 variance (the max and min values are the same), and will be ignored:')
-                print(col)
+                # print('This column appears to have 0 variance (the max and min values are the same), and will be ignored:')
+                # print(col)
                 return 'ignore'
 
     col_summary = {
@@ -835,111 +1070,6 @@ def scale_val(val, min_val, total_range, truncate_large_values=False):
 
     return scaled_value
 
-
-class AddPredictedFeature(BaseEstimator, TransformerMixin):
-
-
-    def __init__(self, type_of_estimator=None, model_name='MiniBatchKMeans', include_original_X=False, y_train=None):
-        # 'regressor' or 'classifier'
-        self.type_of_estimator = type_of_estimator
-        # Name of the model to fit.
-        self.model_name = model_name
-        # WHether to append a single new feature onto the entire existing X feature set and return the entire X dataset plus this new feature, or whether to only return a single feature for the predcicted value
-        self.include_original_X = include_original_X
-        # If this is for an esembled subpredictor, these are the y values we will train the predictor on while running .fit()
-        self.y_train = y_train
-        self.n_clusters = 8
-
-
-    def fit(self, X, y=None):
-        self.model = get_model_from_name(self.model_name)
-
-        if self.y_train is not None:
-            y = y_train
-
-        if self.model_name == 'MiniBatchKMeans':
-            self.model.fit(X)
-        else:
-            self.model.fit(X, y)
-
-        # For ml_for_analytics, we'll want to save these feature names somewhere easily accessible
-        self.added_feature_names_ = ['prdicted_cluster_group_' + str(x) for x in range(self.n_clusters)]
-
-        return self
-
-
-    def transform(self, X, y=None):
-        predictions = self.model.predict(X)
-        if self.model_name == 'MiniBatchKMeans':
-
-            # KMeans will return an int cluster prediction. We need to turn that into categorical variables our models can recognize (cluster=1: True, cluster=2: False, etc.)
-            encoded_predictions = []
-            for prediction in predictions:
-                blank_prediction_row = [0 for x in range(self.n_clusters)]
-                blank_prediction_row[prediction] = 1
-                encoded_predictions.append(blank_prediction_row)
-
-            predictions = encoded_predictions
-        else:
-            # We need to reshape our predictions to each be very clearly one row
-            predictions = [[x] for x in predictions]
-        if self.include_original_X:
-            X = scipy.sparse.hstack((X, predictions), format='csr')
-            return X
-        else:
-            return predictions
-
-
-class AddSubpredictorPredictions(BaseEstimator, TransformerMixin):
-
-
-    def __init__(self, trained_subpredictors, include_original_X=True):
-        self.trained_subpredictors = trained_subpredictors
-        self.include_original_X = include_original_X
-        self.sub_names = [pred.named_steps['final_model'].output_column for pred in self.trained_subpredictors]
-
-
-    def fit(self, X, y=None):
-        return self
-
-
-    def transform(self, X, y=None):
-        if isinstance(X, dict):
-            X = pd.DataFrame(X, index=[0])
-        elif isinstance(X, list):
-            X = pd.DataFrame(X)
-        predictions = []
-
-        if X.shape[0] > 100:
-            pool = pathos.multiprocessing.ProcessPool()
-
-            # Since we may have already closed the pool, try to restart it
-            try:
-                pool.restart()
-            except AssertionError as e:
-                pass
-            predictions = list(pool.uimap(lambda predictor: predictor.predict(X), self.trained_subpredictors))
-            # Once we have gotten all we need from the pool, close it so it's not taking up unnecessary memory
-            pool.close()
-            pool.join()
-
-        else:
-            for predictor in self.trained_subpredictors:
-
-                if predictor.named_steps['final_model'].type_of_estimator == 'regressor':
-                    predictions.append(predictor.predict(X))
-
-                else:
-                    predictions.append(predictor.predict(X))
-
-        if self.include_original_X:
-            for pred_idx, name in enumerate(self.sub_names):
-                X[name + '_sub_prediction'] = predictions[pred_idx]
-            return X
-
-        else:
-            # TODO: Might need to refactor this to take into account that we're using DataFrames now, not a list of lists, where each sublist is a column of predictions
-            return predictions
 
 def safely_drop_columns(df, cols_to_drop):
     safe_cols_to_drop = []

@@ -19,7 +19,7 @@ from sklearn.cross_validation import train_test_split
 from sklearn.decomposition import TruncatedSVD
 from sklearn.feature_extraction import DictVectorizer
 from sklearn.grid_search import GridSearchCV
-from sklearn.metrics import mean_squared_error, brier_score_loss, make_scorer
+from sklearn.metrics import mean_squared_error, brier_score_loss, make_scorer, accuracy_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer
 
@@ -40,6 +40,21 @@ try:
 except:
     from .. auto_ml import DataFrameVectorizer
 
+# XGBoost can be a pain to install. It's also a super powerful and effective package.
+# So we'll make it optional here. If a user wants to install XGBoost themselves, we fully support XGBoost!
+# But, if they just want to get running out of the gate, without dealing with any installation other than what's done for them automatically, we won't force them to go through that.
+# The same logic will apply to deep learning with Keras and TensorFlow
+global xgb_installed
+xgb_installed = False
+try:
+    import xgboost as xgb
+    xgb_installed = True
+except NameError:
+    pass
+except ImportError:
+    pass
+
+
 # Ultimately, we (the authors of auto_ml) are responsible for building a project that's robust against warnings.
 # The classes of warnings below are ones we've deemed acceptable. The user should be able to sit at a high level of abstraction, and not be bothered with the internals of how we're handing these things.
 # Ignore all warnings that are UserWarnings or DeprecationWarnings. We'll fix these ourselves as necessary.
@@ -50,7 +65,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 class Predictor(object):
 
 
-    def __init__(self, type_of_estimator, column_descriptions, verbose=True, _is_subpredictor=False):
+    def __init__(self, type_of_estimator, column_descriptions, verbose=True):
         if type_of_estimator.lower() in ['regressor','regression', 'regressions', 'regressors', 'number', 'numeric', 'continuous']:
             self.type_of_estimator = 'regressor'
         elif type_of_estimator.lower() in ['classifier', 'classification', 'categorizer', 'categorization', 'categories', 'labels', 'labeled', 'label']:
@@ -60,7 +75,6 @@ class Predictor(object):
             raise ValueError('Invalid value for "type_of_estimator". Please pass in either "regressor" or "classifier". You passed in: ' + type_of_estimator)
         self.column_descriptions = column_descriptions
         self.verbose = verbose
-        self._is_subpredictor = _is_subpredictor
         self.trained_pipeline = None
         self._scorer = None
         self.date_cols = []
@@ -75,9 +89,7 @@ class Predictor(object):
 
     def _validate_input_col_descriptions(self):
         found_output_column = False
-        self.subpredictors = []
         self.cols_to_ignore = []
-        subpredictor_vals = set(['regressor', 'classifier'])
         expected_vals = set(['categorical', 'text', 'nlp'])
 
         for key, value in self.column_descriptions.items():
@@ -92,10 +104,8 @@ class Predictor(object):
                 self.cols_to_ignore.append(key)
             elif value in expected_vals:
                 pass
-            elif value in subpredictor_vals:
-                self.subpredictors.append(key)
             else:
-                raise ValueError('We are not sure how to process this column of data: ' + str(value) + '. Please pass in "output", "categorical", "date", or for more advances subpredictor ensembling, "regressor" or "classifier"')
+                raise ValueError('We are not sure how to process this column of data: ' + str(value) + '. Please pass in "output", "categorical", "ignore", or "date".')
         if found_output_column is False:
             print('Here is the column_descriptions that was passed in:')
             print(self.column_descriptions)
@@ -110,55 +120,28 @@ class Predictor(object):
     # We use _construct_pipeline at both the start and end of our training.
     # At the start, it constructs the pipeline from scratch
     # At the end, it takes FeatureSelection out after we've used it to restrict DictVectorizer
-    def _construct_pipeline(self, model_name='LogisticRegression', impute_missing_values=True, trained_pipeline=None, preprocessing_only=False):
+    def _construct_pipeline(self, model_name='LogisticRegression', impute_missing_values=True, trained_pipeline=None):
 
         pipeline_list = []
 
-        # Our subpredictors will not have these portions of the pipeline, so when we try to pull them from a trained_pipeline later, we will get keyErrors, unless we skip this for subpredictors.
-        if self._is_subpredictor == False:
-            if self.user_input_func is not None:
-                if trained_pipeline is not None:
-                    pipeline_list.append(('user_func', trained_pipeline.named_steps['user_func']))
-                else:
-                    pipeline_list.append(('user_func', FunctionTransformer(func=self.user_input_func, pass_y=False, validate=False) ))
-
-            # if len(self.date_cols) > 0:
-            #     if trained_pipeline is not None:
-            #         pipeline_list.append(('date_feature_engineering', trained_pipeline.named_steps['date_feature_engineering']))
-            #     else:
-            #         pipeline_list.append(('date_feature_engineering', date_feature_engineering.FeatureEngineer(date_cols=self.date_cols)))
-
-            # These parts will be included no matter what.
+        if self.user_input_func is not None:
             if trained_pipeline is not None:
-                pipeline_list.append(('basic_transform', trained_pipeline.named_steps['basic_transform']))
+                pipeline_list.append(('user_func', trained_pipeline.named_steps['user_func']))
             else:
-                pipeline_list.append(('basic_transform', utils.BasicDataCleaning(column_descriptions=self.column_descriptions)))
+                pipeline_list.append(('user_func', FunctionTransformer(func=self.user_input_func, pass_y=False, validate=False) ))
 
-            if self.perform_feature_scaling is True or (self.compute_power >= 7 and self.perform_feature_scaling is not False):
-                if trained_pipeline is not None:
-                    pipeline_list.append(('scaler', trained_pipeline.named_steps['scaler']))
-                else:
-                    pipeline_list.append(('scaler', utils.CustomSparseScaler(self.column_descriptions)))
+        # These parts will be included no matter what.
+        if trained_pipeline is not None:
+            pipeline_list.append(('basic_transform', trained_pipeline.named_steps['basic_transform']))
+        else:
+            pipeline_list.append(('basic_transform', utils.BasicDataCleaning(column_descriptions=self.column_descriptions)))
 
-        # ###################
-        # Subpredictor split in the pipeline
-        # ###################
-        if self._is_subpredictor == True:
-            # If this is a subpredictor, we only want this second portion of our pipeline.
-            # For our subpredictors, we will already have run the first part of the pipeline as a one-off before training any of the subpredictor pipelines. This saves us from doing the exact same data cleaning for each and every new subpredictor we train.
-            # So clear out anything that may have been added to our pipeline so far.
-            pipeline_list = []
-
-        # When training subpredictors, we will perform all of our preprocessing a single time at the beginning of that round of training subpredictors. That will reduce the overall size of our dataset (making it easier to serialize), and also save us the trouble of repeating that exact same computation over and over and over again
-        if preprocessing_only:
-            return Pipeline(pipeline_list)
-
-
-        if len(self.trained_subpredictors) > 0:
+        if self.perform_feature_scaling is True or (self.compute_power >= 7 and self.perform_feature_scaling is not False):
             if trained_pipeline is not None:
-                pipeline_list.append(('subpredictors', trained_pipeline.named_steps['subpredictors']))
+                pipeline_list.append(('scaler', trained_pipeline.named_steps['scaler']))
             else:
-                pipeline_list.append(('subpredictors', utils.AddSubpredictorPredictions(trained_subpredictors=self.trained_subpredictors)))
+                pipeline_list.append(('scaler', utils.CustomSparseScaler(self.column_descriptions)))
+
 
         if trained_pipeline is not None:
             pipeline_list.append(('dv', trained_pipeline.named_steps['dv']))
@@ -173,12 +156,6 @@ class Predictor(object):
             else:
                 # pipeline_list.append(('pca', TruncatedSVD()))
                 pipeline_list.append(('feature_selection', utils.FeatureSelectionTransformer(type_of_estimator=self.type_of_estimator, column_descriptions=self.column_descriptions, feature_selection_model='SelectFromModel') ))
-
-        if self.add_cluster_prediction is True or (self.compute_power >=10 and self.add_cluster_prediction is not False):
-            if trained_pipeline is not None:
-                pipeline_list.append(('add_cluster_prediction', trained_pipeline['add_cluster_prediction']))
-            else:
-                pipeline_list.append(('add_cluster_prediction', utils.AddPredictedFeature(model_name='MiniBatchKMeans', type_of_estimator=self.type_of_estimator, include_original_X=True)))
 
         if trained_pipeline is not None:
             pipeline_list.append(('final_model', trained_pipeline.named_steps['final_model']))
@@ -219,7 +196,10 @@ class Predictor(object):
 
     def _get_estimator_names(self):
         if self.type_of_estimator == 'regressor':
-            base_estimators = ['GradientBoostingRegressor']
+            if xgb_installed:
+                base_estimators = ['XGBRegressor']
+            else:
+                base_estimators = ['GradientBoostingRegressor']
             if self.compute_power < 7:
                 return base_estimators
             else:
@@ -231,7 +211,10 @@ class Predictor(object):
                 return base_estimators
 
         elif self.type_of_estimator == 'classifier':
-            base_estimators = ['GradientBoostingClassifier']
+            if xgb_installed:
+                base_estimators = ['XGBClassifier']
+            else:
+                base_estimators = ['GradientBoostingClassifier']
             if self.compute_power < 7:
                 return base_estimators
             else:
@@ -311,73 +294,8 @@ class Predictor(object):
         return X_df, y
 
 
-    def _make_sub_column_descriptions(self, column_descriptions, sub_name):
-
-        subpredictor_types = set(['classifier', 'regressor'])
-        dup_descs = {}
-
-        for key, val in column_descriptions.items():
-
-            # Obviously, skip the parent ensembler's output column
-            if val != 'output':
-                if key == sub_name:
-                    # set the right sub_name to be output for this subpredictor
-                    dup_descs[key] = 'output'
-                    sub_type_of_estimator = val
-                elif val in subpredictor_types:
-                    dup_descs[key] = 'ignore'
-
-                # Include all other subpredictor names, so that we know to ignore them later on inside this subpredictor
-                else:
-                    dup_descs[key] = val
-
-        return dup_descs, sub_type_of_estimator
-
-    def make_sub_x_and_y_test(self, X_test, sub_name):
-        X_test = X_test[X_test.notnull()]
-        y = X_test.pop(sub_name)
-        return X_test, y
-
-
-    def _train_subpredictor(self, sub_name, X_subpredictors, sub_model_names=None, sub_ml_analytics=False, sub_compute_power=5):
-
-        sub_column_descriptions, sub_type_of_estimator = self._make_sub_column_descriptions(self.column_descriptions, sub_name)
-        if sub_model_names is None and sub_type_of_estimator == 'classifier':
-            # sub_model_names = ['XGBClassifier']
-            sub_model_names = ['GradientBoostingClassifier']
-        elif sub_model_names is None and sub_type_of_estimator == 'regressor':
-            # sub_model_names = ['XGBRegressor']
-            sub_model_names = ['GradientBoostingRegressor']
-
-        ml_predictor = Predictor(type_of_estimator=sub_type_of_estimator, column_descriptions=sub_column_descriptions, _is_subpredictor=True)
-
-        if self.X_test is not None and self.y_test is not None:
-            sub_X_test, sub_y_test = self.make_sub_x_and_y_test(self.X_test, sub_name)
-        else:
-            sub_X_test = None
-            sub_y_test = None
-
-        # NOTE that we will be mutating the input X here by stripping off the y values.
-        ml_predictor.train(raw_training_data=X_subpredictors
-            , perform_feature_selection=True
-            , X_test=sub_X_test
-            , y_test=sub_y_test
-            , ml_for_analytics=sub_ml_analytics
-            , compute_power=sub_compute_power
-            , take_log_of_y=False
-            , add_cluster_prediction=False
-            , model_names=sub_model_names
-            , write_gs_param_results_to_file=False
-            , optimize_final_model=self.optimize_final_model
-        )
-
-        abbreviated_pipeline = self._abbreviate_pipeline(ml_predictor)
-
-        # self.subpredictors[sub_idx] = abbreviated_pipeline
-        return abbreviated_pipeline
-
     def _consolidate_feature_selection_steps(self, trained_pipeline):
-        # First, restrict our DictVectorizer
+        # First, restrict our DictVectorizer or DataFrameVectorizer
         # This goes through and has DV only output the items that have passed our support mask
         # This has a number of benefits: speeds up computation, reduces memory usage, and combines several transforms into a single, easy step
         # It also significantly reduces the size of dv.vocabulary_ which can get quite large
@@ -394,53 +312,7 @@ class Predictor(object):
         return trained_pipeline_without_feature_selection
 
 
-    def _abbreviate_pipeline(self, trained_ml_predictor):
-
-        trained_pipeline = trained_ml_predictor.trained_pipeline
-
-        dv = trained_pipeline.named_steps['dv']
-        final_model = trained_pipeline.named_steps['final_model']
-        final_model.output_column = trained_ml_predictor.output_column
-
-        abbreviated_pipeline = []
-        abbreviated_pipeline.append(('dv', dv))
-        abbreviated_pipeline.append(('final_model', final_model))
-
-        abbreviated_pipeline = Pipeline(abbreviated_pipeline)
-
-        # Our abbreviated pipeline will now expect to get dictionaries that have already gone through all the preliminary preparation steps (BasicDataCleaning, date_feature_engineering, scaling, etc.)
-        return abbreviated_pipeline
-
-
-    def train_one_subpredictor(self, sub_name):
-        print('Now training a subpredictor for ' + sub_name)
-
-        # Print out analytics for the subpredictor if we are printing them for the parent.
-        sub_ml_analytics = self.ml_for_analytics
-        sub_compute_power = self.compute_power
-
-        sub_model_names = None
-        if sub_name[:14] == 'weak_estimator':
-            weak_estimator_list = self.weak_estimator_store[self.type_of_estimator]
-
-            # It would be ideal to cycle through the weak estimator names in order.
-            # But multiprocessing makes that slightly more challenging, so for now, just grab a random index
-            name_index = int(random.random() * len(weak_estimator_list))
-            weak_estimator_name = weak_estimator_list[name_index]
-            sub_model_names = [weak_estimator_name]
-
-            # If this is a weak predictor, ignore the analytics.
-            sub_ml_analytics = False
-            sub_compute_power = 1
-
-            # Now we have to give it the data to train on!
-            # In this case, it's just a smaller portion of our final prediction
-            self.X_subpredictors[sub_name] = self.y_subpredictors
-
-        return self._train_subpredictor(sub_name, self.X_subpredictors, sub_model_names=sub_model_names, sub_ml_analytics=sub_ml_analytics, sub_compute_power=sub_compute_power)
-
-
-    def train(self, raw_training_data, user_input_func=None, optimize_entire_pipeline=False, optimize_final_model=None, write_gs_param_results_to_file=True, perform_feature_selection=True, verbose=True, X_test=None, y_test=None, print_training_summary_to_viewer=True, ml_for_analytics=True, only_analytics=False, compute_power=3, take_log_of_y=None, model_names=None, add_cluster_prediction=None, num_weak_estimators=0, perform_feature_scaling=True):
+    def train(self, raw_training_data, user_input_func=None, optimize_entire_pipeline=False, optimize_final_model=None, write_gs_param_results_to_file=True, perform_feature_selection=True, verbose=True, X_test=None, y_test=None, print_training_summary_to_viewer=True, ml_for_analytics=True, only_analytics=False, compute_power=3, take_log_of_y=None, model_names=None, perform_feature_scaling=True):
 
         self.user_input_func = user_input_func
         self.optimize_final_model = optimize_final_model
@@ -455,28 +327,8 @@ class Predictor(object):
         self.print_training_summary_to_viewer = print_training_summary_to_viewer
         if self.type_of_estimator == 'regressor':
             self.take_log_of_y = take_log_of_y
-        self.add_cluster_prediction = add_cluster_prediction
-        self.num_weak_estimators = num_weak_estimators
         self.model_names = model_names
         self.perform_feature_scaling = perform_feature_scaling
-        self.trained_subpredictors = []
-
-        # Put in place the markers that will tell us later on to train up a subpredictor for this problem
-        if self.num_weak_estimators > 0:
-            for idx in range(self.num_weak_estimators):
-                self.column_descriptions['weak_estimator_' + str(idx)] = self.type_of_estimator
-                self.subpredictors.append('weak_estimator_' + str(idx))
-            self.weak_estimator_store = {
-                'regressor': ['LinearRegression', 'Ridge', 'Lasso', 'ElasticNet'
-                # , 'LassoLars'
-                # , 'OrthogonalMatchingPursuit'
-                # , 'BayesianRidge'
-                # , 'ARDRegression'
-                , 'SGDRegressor'
-                , 'PassiveAggressiveRegressor'
-                ],
-                'classifier': ['LogisticRegression', 'RidgeClassifier', 'SGDClassifier', 'Perceptron', 'PassiveAggressiveClassifier']
-            }
 
         if verbose:
             print('Welcome to auto_ml! We\'re about to go through and make sense of your data using machine learning')
@@ -491,53 +343,13 @@ class Predictor(object):
 
 
         # To keep this as light in memory as possible, immediately remove any columns that the user has already told us should be ignored
-        if len(self.cols_to_ignore) > 0 and self._is_subpredictor is False:
+        if len(self.cols_to_ignore) > 0:
             X_df = utils.safely_drop_columns(X_df, self.cols_to_ignore)
-            # X_df = X_df.drop(self.cols_to_ignore, axis=1)
 
         X_df, y = self._prepare_for_training(X_df)
         self.X_df = X_df
         self.y = y
 
-        # Once we have removed the applicable y-values, look into creating any subpredictors we might need
-        if len(self.subpredictors) > 0:
-            print('We are going to be training up several subpredictors before training up our final ensembled predictor')
-
-            # Split out a percentage of our dataset to use ONLY for training subpredictors.
-            # We will batch train the subpredictors once at the start, before GridSearchCV, to avoide computationally expensive repetitive training of these same models.
-            # However, this means we'll have to train our subpredictors on a different dataset than we train our larger ensemble predictor on.
-            # X_ensemble is the X data we'll be using to train our ensemble (the bulk of our data), and y_ensemble is, of course, the relevant y data for training our ensemble.
-            # X_subpredictors is the smaller subset of data we'll be using to train our subpredictors on. y_subpredictors doesn't make any sense- it's the y values for our ensemble, but split to mirror the data we're using to train our subpredictors. Thus, we'll ignore it.
-            total_training_length = len(X_df)
-
-            subpredictor_percentage = 0.33
-            subpredictor_split_idx = int(total_training_length * subpredictor_percentage)
-            self.X_subpredictors = X_df[:subpredictor_split_idx]
-            self.y_subpredictors = y[:subpredictor_split_idx]
-            self.X_ensemble = X_df[subpredictor_split_idx:]
-            self.y_ensemble = y[subpredictor_split_idx:]
-
-            # self.X_ensemble, self.X_subpredictors, self.y_ensemble, self.y_subpredictors = train_test_split(X_df, y, test_size=0.33)
-            X_df = self.X_ensemble
-            y = self.y_ensemble
-
-            # Do all the preprocessing steps right at the very start
-            # This avoids us duplicating this effort by re-doing these steps inside every single subpredictor we want to train up
-            preprocessing_pipeline = self._construct_pipeline(preprocessing_only=True)
-            self.X_subpredictors = preprocessing_pipeline.fit_transform(self.X_subpredictors)
-
-            # Train up all of our subpredictors in parallel!
-            pool = pathos.multiprocessing.ProcessPool()
-            try:
-                pool.restart()
-            except AssertionError as e:
-                pass
-            self.trained_subpredictors = list(pool.uimap(self.train_one_subpredictor, self.subpredictors))
-            pool.close()
-            pool.join()
-
-            del self.X_subpredictors
-            del self.y_subpredictors
 
         if self.take_log_of_y:
             y = [math.log(val) for val in y]
@@ -552,7 +364,10 @@ class Predictor(object):
             estimator_names = self._get_estimator_names()
 
         if self.type_of_estimator == 'classifier':
-            scoring = utils.brier_score_loss_wrapper
+            if len(set(y)) > 2:
+                scoring = accuracy_score
+            else:
+                scoring = utils.brier_score_loss_wrapper
             self._scorer = scoring
         else:
             scoring = utils.rmse_scoring
@@ -566,7 +381,7 @@ class Predictor(object):
 
         # If we ran GridSearchCV, we will have to pick the best model
         # If we did not, the best trained pipeline will already be saved in self.trained_pipeline
-        if self.fit_grid_search:
+        if self.fit_grid_search and len(self.grid_search_pipelines) > 1:
             # Once we have trained all the pipelines, select the best one based on it's performance on (top priority first):
             # 1. Holdout data
             # 2. CV data
@@ -583,14 +398,9 @@ class Predictor(object):
             self.trained_pipeline = best_trained_gs.best_estimator_
 
         # Delete values that we no longer need that are just taking up space.
-        # If this is a subpredictor, this makes GridSearchCV easier, since there's less data to clone to each new thread.
-        # And of course, when we go to save this model and upload it to production servers, there will be less data to move around.
         del self.X_test
         del self.y_test
         del self.grid_search_pipelines
-        del self.subpredictors
-        del self.X_ensemble
-        del self.y_ensemble
         del X_df
 
 
@@ -637,7 +447,7 @@ class Predictor(object):
                     # Print warnings when we fail to fit a given combination of parameters, but do not raise an error.
                     # Set the score on this partition to some very negative number, so that we do not choose this estimator.
                     error_score=-1000000000,
-                    scoring=scoring
+                    scoring=scoring,
                     # ,pre_dispatch='1*n_jobs'
                 )
 
@@ -645,7 +455,8 @@ class Predictor(object):
                     print('\n\n********************************************************************************************')
                     print('About to fit the GridSearchCV on the pipeline for the model ' + model_name + ' to predict ' + self.output_column)
 
-                gs.fit(X, y)
+                gs.fit(X_df, y)
+
                 self.trained_pipeline = gs.best_estimator_
 
                 # write the results for each param combo to file for user analytics.
@@ -679,6 +490,9 @@ class Predictor(object):
 
             # DictVectorizer will now perform DictVectorizer and FeatureSelection in a very efficient combination of the two steps.
             self.trained_pipeline = self._consolidate_feature_selection_steps(self.trained_pipeline)
+
+            if self.fit_grid_search:
+                self.grid_search_pipelines.append(self.trained_pipeline)
 
             if self.ml_for_analytics and model_name in ('LogisticRegression', 'RidgeClassifier', 'LinearRegression', 'Ridge'):
                 self._print_ml_analytics_results_regression()
@@ -748,7 +562,7 @@ class Predictor(object):
         print('Here are the feature_importances from the tree-based model:')
         print('The printed list will only contain at most the top 50 features.')
         for feature in sorted_feature_infos[-50:]:
-            print(feature[0] + ': ' + str(round(feature[1] / sum_of_all_feature_importances, 4)))
+            print(str(feature[0]) + ': ' + str(round(feature[1] / sum_of_all_feature_importances, 4)))
 
 
     def _print_ml_analytics_results_random_forest(self):
@@ -791,7 +605,7 @@ class Predictor(object):
         else:
             trained_coefficients = self.trained_pipeline.named_steps['final_model'].model.coef_
 
-        feature_ranges = self.trained_pipeline.named_steps['final_model'].feature_ranges
+        # feature_ranges = self.trained_pipeline.named_steps['final_model'].feature_ranges
 
         # TODO(PRESTON): readability. Can probably do this in a single zip statement.
         feature_summary = []
@@ -842,7 +656,7 @@ class Predictor(object):
             for idx, val in predicted_vals:
                 predicted_vals[idx] = math.exp(val)
 
-        del prediction_data
+        # del prediction_data
         return predicted_vals
 
 
@@ -850,29 +664,27 @@ class Predictor(object):
         if isinstance(prediction_data, list):
             prediction_data = pd.DataFrame(prediction_data)
 
-        del prediction_data
         return self.trained_pipeline.predict_proba(prediction_data)
 
 
-    def score(self, X_test, y_test, advanced_scoring=False):
+    def score(self, X_test, y_test, advanced_scoring=True):
         if isinstance(X_test, list):
             X_test = pd.DataFrame(X_test)
         y_test = list(y_test)
+
         if self._scorer is not None:
-            # try:
             if self.type_of_estimator == 'regressor':
                 return self._scorer(self.trained_pipeline, X_test, y_test, self.took_log_of_y, advanced_scoring=advanced_scoring)
             elif self.type_of_estimator == 'classifier':
-                if advanced_scoring:
+                if self._scorer == accuracy_score:
+                    predictions = self.trained_pipeline.predict(X_test)
+                    return self._scorer(y_test, predictions)
+                elif advanced_scoring:
                     score, probas = self._scorer(self.trained_pipeline, X_test, y_test, advanced_scoring=advanced_scoring)
                     utils.advanced_scoring_classifiers(probas, y_test)
                     return score
                 else:
                     return self._scorer(self.trained_pipeline, X_test, y_test, advanced_scoring=advanced_scoring)
-
-            # except:
-
-            #     return self._scorer(self.trained_pipeline, X_test, y_test)
         else:
             return self.trained_pipeline.score(X_test, y_test)
 
