@@ -252,7 +252,7 @@ class Predictor(object):
         X_df = X_df.dropna(subset=[self.output_column])
 
         # See if we have a date_column
-        if len(self.date_cols) > 0 and not self._is_subpredictor:
+        if len(self.date_cols) > 0:
             X_df = X_df.sort_values(by=self.date_cols[0])
 
         # Remove the output column from the dataset, and store it into the y varaible
@@ -316,11 +316,12 @@ class Predictor(object):
         return trained_pipeline_without_feature_selection
 
 
-    def train_ensemble(self, data, ensemble_training_list):
+    def train_ensemble(self, data, ensemble_training_list, X_test=None, y_test=None):
 
         self.ensemble_predictors = []
 
         self.is_ensemble = True
+        self.ml_for_analytics = True
 
         if self.type_of_estimator == 'classifier':
             scoring = utils.brier_score_loss_wrapper
@@ -356,7 +357,15 @@ class Predictor(object):
 
             self.ensemble_predictors.append(ml_predictor)
 
+
+
         self.trained_pipeline = utils.Ensemble(ensemble_predictors=self.ensemble_predictors, type_of_estimator=self.type_of_estimator)
+
+        if X_test is not None:
+            print('Scoring each of the trained subpredictors on the holdout data')
+            for predictor in self.ensemble_predictors:
+                print(predictor.name)
+                predictor.score(X_test, y_test)
 
 
     def train(self, raw_training_data, user_input_func=None, optimize_entire_pipeline=False, optimize_final_model=None, write_gs_param_results_to_file=True, perform_feature_selection=True, verbose=True, X_test=None, y_test=None, print_training_summary_to_viewer=True, ml_for_analytics=True, only_analytics=False, compute_power=3, take_log_of_y=None, model_names=None, perform_feature_scaling=True):
@@ -715,14 +724,15 @@ class Predictor(object):
         return self.trained_pipeline.predict_proba(prediction_data)
 
 
-    def score(self, X_test, y_test, advanced_scoring=True):
+    def score(self, X_test, y_test, advanced_scoring=True, verbose=2):
+
         if isinstance(X_test, list):
             X_test = pd.DataFrame(X_test)
         y_test = list(y_test)
 
         if self._scorer is not None:
             if self.type_of_estimator == 'regressor':
-                return self._scorer(self.trained_pipeline, X_test, y_test, self.took_log_of_y, advanced_scoring=advanced_scoring)
+                return self._scorer(self.trained_pipeline, X_test, y_test, self.took_log_of_y, advanced_scoring=advanced_scoring, verbose=verbose)
             elif self.type_of_estimator == 'classifier':
                 if self._scorer == accuracy_score:
                     predictions = self.trained_pipeline.predict(X_test)
@@ -808,10 +818,10 @@ class Predictor(object):
             print('It is worthwhile to make sure that you feed in all the most useful data points though, to make sure you can get the highest quality predictions.')
             print('\nThese are the most important features that were fed into the model:')
 
-            if self.ml_for_analytics and self.trained_pipeline.named_steps['final_model'].model_name in ('LogisticRegression', 'RidgeClassifier', 'LinearRegression', 'Ridge'):
-                self._print_ml_analytics_results_regression()
-            elif self.ml_for_analytics and self.trained_pipeline.named_steps['final_model'].model_name in ['RandomForestClassifier', 'RandomForestRegressor', 'XGBClassifier', 'XGBRegressor']:
-                self._print_ml_analytics_results_random_forest()
+            # if self.ml_for_analytics and self.trained_pipeline.named_steps['final_model'].model_name in ('LogisticRegression', 'RidgeClassifier', 'LinearRegression', 'Ridge'):
+            #     self._print_ml_analytics_results_regression()
+            # elif self.ml_for_analytics and self.trained_pipeline.named_steps['final_model'].model_name in ['RandomForestClassifier', 'RandomForestRegressor', 'XGBClassifier', 'XGBRegressor']:
+            #     self._print_ml_analytics_results_random_forest()
 
         return os.getcwd() + file_name
 

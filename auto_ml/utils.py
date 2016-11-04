@@ -724,7 +724,7 @@ def calculate_and_print_differences(predictions, actuals):
     print(sum(ten_min_off) * 1.0 / len(ten_min_off))
 
 
-def advanced_scoring_regressors(predictions, actuals):
+def advanced_scoring_regressors(predictions, actuals, verbose=2):
 
     print('\n\n***********************************************')
     print('Advanced scoring metrics for the trained regression model on this particular dataset:\n')
@@ -764,24 +764,25 @@ def advanced_scoring_regressors(predictions, actuals):
     actuals_sorted = [act for act, pred in actuals_preds]
     predictions_sorted = [pred for act, pred in actuals_preds]
 
-    print('Here\'s how the trained predictor did on each successive decile (ten percent chunk) of the predictions:')
-    for i in range(1,10):
-        print('\n**************')
-        print('Bucket number:')
-        print(i)
-        # There's probably some fenceposting error here
-        min_idx = int((i - 1) / 10.0 * len(actuals_sorted))
-        max_idx = int(i / 10.0 * len(actuals_sorted))
-        actuals_for_this_decile = actuals_sorted[min_idx:max_idx]
-        predictions_for_this_decile = predictions_sorted[min_idx:max_idx]
+    if verbose > 2:
+        print('Here\'s how the trained predictor did on each successive decile (ten percent chunk) of the predictions:')
+        for i in range(1,10):
+            print('\n**************')
+            print('Bucket number:')
+            print(i)
+            # There's probably some fenceposting error here
+            min_idx = int((i - 1) / 10.0 * len(actuals_sorted))
+            max_idx = int(i / 10.0 * len(actuals_sorted))
+            actuals_for_this_decile = actuals_sorted[min_idx:max_idx]
+            predictions_for_this_decile = predictions_sorted[min_idx:max_idx]
 
-        print('Avg predicted val in this bucket')
-        print(sum(predictions_for_this_decile) * 1.0 / len(predictions_for_this_decile))
-        print('Avg actual val in this bucket')
-        print(sum(actuals_for_this_decile) * 1.0 / len(actuals_for_this_decile))
-        print('RMSE for this bucket')
-        print(mean_squared_error(actuals_for_this_decile, predictions_for_this_decile)**0.5)
-        calculate_and_print_differences(predictions_for_this_decile, actuals_for_this_decile)
+            print('Avg predicted val in this bucket')
+            print(sum(predictions_for_this_decile) * 1.0 / len(predictions_for_this_decile))
+            print('Avg actual val in this bucket')
+            print(sum(actuals_for_this_decile) * 1.0 / len(actuals_for_this_decile))
+            print('RMSE for this bucket')
+            print(mean_squared_error(actuals_for_this_decile, predictions_for_this_decile)**0.5)
+            calculate_and_print_differences(predictions_for_this_decile, actuals_for_this_decile)
 
     print('')
     print('\n***********************************************\n\n')
@@ -921,7 +922,7 @@ class FeatureSelectionTransformer(BaseEstimator, TransformerMixin):
             return pruned_X
 
 
-def rmse_scoring(estimator, X, y, took_log_of_y=False, advanced_scoring=False):
+def rmse_scoring(estimator, X, y, took_log_of_y=False, advanced_scoring=False, verbose=2):
     if isinstance(estimator, GradientBoostingRegressor):
         X = X.toarray()
     predictions = estimator.predict(X)
@@ -930,7 +931,7 @@ def rmse_scoring(estimator, X, y, took_log_of_y=False, advanced_scoring=False):
             predictions[idx] = math.exp(val)
     rmse = mean_squared_error(y, predictions)**0.5
     if advanced_scoring == True:
-        advanced_scoring_regressors(predictions, y)
+        advanced_scoring_regressors(predictions, y, verbose=verbose)
     return - 1 * rmse
 
 
