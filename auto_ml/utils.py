@@ -931,6 +931,8 @@ def rmse_scoring(estimator, X, y, took_log_of_y=False, advanced_scoring=False, v
             predictions[idx] = math.exp(val)
     rmse = mean_squared_error(y, predictions)**0.5
     if advanced_scoring == True:
+        if hasattr(estimator, 'name'):
+            print(estimator.name)
         advanced_scoring_regressors(predictions, y, verbose=verbose)
     return - 1 * rmse
 
@@ -1084,15 +1086,16 @@ def safely_drop_columns(df, cols_to_drop):
 
 class Ensemble(object):
 
-    def __init__(self, ensemble_predictors, type_of_estimator):
+    def __init__(self, ensemble_predictors, type_of_estimator, method='average'):
         self.ensemble_predictors = ensemble_predictors
         self.type_of_estimator = type_of_estimator
+        self.method = method
+
 
 
     def predict(self, df):
-        predictions_from_all_estimators = {}
 
-        for estimator in self.ensemble_predictors:
+        def get_predictions_for_one_estimator(estimator, df):
             estimator_name = estimator.name
 
             if self.type_of_estimator == 'regressor':
@@ -1104,19 +1107,43 @@ class Ensemble(object):
                 # Note that this DOES NOT work with multi-class classification tasks yet
                 predictions = [pred[1] for pred in predictions]
 
-            predictions_from_all_estimators[estimator_name] = predictions
+            return {estimator_name: predictions}
 
-        predictions_df = pd.DataFrame.from_dict(predictions_from_all_estimators, orient='columns')
-        # print(predictions_df)
+
+        # Open a new multiprocessing pool
+        pool = pathos.multiprocessing.ProcessPool()
+
+        # Since we may have already closed the pool, try to restart it
+        try:
+            pool.restart()
+        except AssertionError as e:
+            pass
+
+        predictions_from_all_estimators = pool.map(lambda predictor: get_predictions_for_one_estimator(predictor, df), self.ensemble_predictors)
+        predictions_from_all_estimators = list(predictions_from_all_estimators)
+
+        # Once we have gotten all we need from the pool, close it so it's not taking up unnecessary memory
+        pool.close()
+        pool.join()
+
+
+        results = {}
+        for result_dict in predictions_from_all_estimators:
+            results.update(result_dict)
+
+        predictions_df = pd.DataFrame.from_dict(results, orient='columns')
 
         summarized_predictions = []
         for idx, row in predictions_df.iterrows():
-            # row = list(row)
-            # print(np.median(row))
-            summarized_predictions.append(np.average(row))
+            if self.method == 'median':
+                summarized_predictions.append(np.median(row))
+            elif self.method == 'average' or self.method == 'mean':
+                summarized_predictions.append(np.average(row))
+            elif self.method == 'max':
+                summarized_predictions.append(np.max(row))
+            elif self.method == 'min':
+                summarized_predictions.append(np.min(row))
+
 
         return summarized_predictions
-
-    # def score(self, df):
-
 

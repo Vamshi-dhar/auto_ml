@@ -65,7 +65,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 class Predictor(object):
 
 
-    def __init__(self, type_of_estimator, column_descriptions, verbose=True):
+    def __init__(self, type_of_estimator, column_descriptions, verbose=True, name=None):
         if type_of_estimator.lower() in ['regressor','regression', 'regressions', 'regressors', 'number', 'numeric', 'continuous']:
             self.type_of_estimator = 'regressor'
         elif type_of_estimator.lower() in ['classifier', 'classification', 'categorizer', 'categorization', 'categories', 'labels', 'labeled', 'label']:
@@ -88,7 +88,7 @@ class Predictor(object):
 
         self.is_ensemble = False
         # Set this here for later use if this is an ensembled subpredictor
-        self.name = None
+        self.name = name
 
 
     def _validate_input_col_descriptions(self):
@@ -316,7 +316,7 @@ class Predictor(object):
         return trained_pipeline_without_feature_selection
 
 
-    def train_ensemble(self, data, ensemble_training_list, X_test=None, y_test=None):
+    def train_ensemble(self, data, ensemble_training_list, X_test=None, y_test=None, ensemble_method='median'):
 
         self.ensemble_predictors = []
 
@@ -331,18 +331,20 @@ class Predictor(object):
             self._scorer = scoring
 
 
-        for idx, training_params in enumerate(ensemble_training_list):
+        # ################################
+        # Train one subpredictor, with logging, and only a subset of the data as chosen by the user
+        # ################################
+        def train_one_ensemble_subpredictor(training_params):
+
             print('\n\n************************')
-            print('Training a new ensemble!')
-            name = 'ensemble_sub_estimator_' + str(idx)
-            if training_params.get('name', False):
-                name = training_params.pop('name')
-                print('The name you gave for this ensemble is:')
-                print(name)
+            print('Training a new subpredictor for the ensemble!')
+            name = training_params.pop('name')
+            print('The name you gave for this ensemble is:')
+            print(name)
             print('\n\n')
             type_of_estimator = training_params.pop('type_of_estimator')
             col_descs = training_params.pop('column_descriptions')
-            ml_predictor = Predictor(type_of_estimator, col_descs)
+            ml_predictor = Predictor(type_of_estimator, col_descs, name=name)
 
             this_rounds_data = data
 
@@ -353,19 +355,54 @@ class Predictor(object):
             training_params['raw_training_data'] = this_rounds_data
 
             ml_predictor.train(**training_params)
-            ml_predictor.name = name
 
-            self.ensemble_predictors.append(ml_predictor)
+            return ml_predictor
+
+            # self.ensemble_predictors.append(ml_predictor)
 
 
+        # ################################
+        # Train subpredictors in parallel
+        # ################################
+        pool = pathos.multiprocessing.ProcessPool()
 
-        self.trained_pipeline = utils.Ensemble(ensemble_predictors=self.ensemble_predictors, type_of_estimator=self.type_of_estimator)
+        # Since we may have already closed the pool, try to restart it
+        try:
+            pool.restart()
+        except AssertionError as e:
+            pass
+        self.ensemble_predictors = pool.map(train_one_ensemble_subpredictor, ensemble_training_list)
+        self.ensemble_predictors = list(self.ensemble_predictors)
+        # Once we have gotten all we need from the pool, close it so it's not taking up unnecessary memory
+        pool.close()
+        pool.join()
 
+
+        # Create an instance of an Ensemble object that will get predictions from all the trained subpredictors
+        self.trained_pipeline = utils.Ensemble(ensemble_predictors=self.ensemble_predictors, type_of_estimator=self.type_of_estimator, method=ensemble_method)
+
+        # ################################
+        # Print scoring information for each trained subpredictor
+        # ################################
         if X_test is not None:
             print('Scoring each of the trained subpredictors on the holdout data')
-            for predictor in self.ensemble_predictors:
+
+            def score_predictor(predictor, X_test, y_test):
                 print(predictor.name)
                 predictor.score(X_test, y_test)
+
+            pool = pathos.multiprocessing.ProcessPool()
+
+            # Since we may have already closed the pool, try to restart it
+            try:
+                pool.restart()
+            except AssertionError as e:
+                pass
+            pool.map(lambda predictor: score_predictor(predictor, X_test, y_test), self.ensemble_predictors)
+            # Once we have gotten all we need from the pool, close it so it's not taking up unnecessary memory
+            pool.close()
+            pool.join()
+
 
 
     def train(self, raw_training_data, user_input_func=None, optimize_entire_pipeline=False, optimize_final_model=None, write_gs_param_results_to_file=True, perform_feature_selection=True, verbose=True, X_test=None, y_test=None, print_training_summary_to_viewer=True, ml_for_analytics=True, only_analytics=False, compute_power=3, take_log_of_y=None, model_names=None, perform_feature_scaling=True):
@@ -624,6 +661,8 @@ class Predictor(object):
 
     def _print_ml_analytics_results_random_forest(self):
         print('\n\nHere are the results from our ' + self.trained_pipeline.named_steps['final_model'].model_name)
+        if self.name != None:
+            print(self.name)
         print('predicting ' + self.output_column)
 
         # XGB's Classifier has a proper .feature_importances_ property, while the XGBRegressor does not.
