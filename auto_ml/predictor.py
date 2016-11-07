@@ -1,6 +1,4 @@
-import bz2
 import datetime
-import gzip
 import math
 import os
 import random
@@ -128,11 +126,19 @@ class Predictor(object):
 
         pipeline_list = []
 
+        if self.ensembler is not None:
+            if trained_pipeline is not None:
+                pipeline_list.append(('add_ensemble_predictions', trained_pipeline.named_steps['add_ensemble_predictions']))
+            else:
+                print('self.ensembler')
+                print(self.ensembler)
+                pipeline_list.append(('add_ensemble_predictions', utils.AddEnsembledPredictions(ensembler=self.ensembler, type_of_estimator=self.type_of_estimator)))
+
         if self.user_input_func is not None:
             if trained_pipeline is not None:
                 pipeline_list.append(('user_func', trained_pipeline.named_steps['user_func']))
             else:
-                pipeline_list.append(('user_func', FunctionTransformer(func=self.user_input_func, pass_y=False, validate=False) ))
+                pipeline_list.append(('user_func', FunctionTransformer(func=self.user_input_func, pass_y=False, validate=False)))
 
         # These parts will be included no matter what.
         if trained_pipeline is not None:
@@ -251,9 +257,6 @@ class Predictor(object):
             print('We will remove these values, and continue with training on the cleaned dataset')
         X_df = X_df.dropna(subset=[self.output_column])
 
-        # See if we have a date_column
-        if len(self.date_cols) > 0:
-            X_df = X_df.sort_values(by=self.date_cols[0])
 
         # Remove the output column from the dataset, and store it into the y varaible
         y = list(X_df.pop(self.output_column))
@@ -305,7 +308,12 @@ class Predictor(object):
         # It also significantly reduces the size of dv.vocabulary_ which can get quite large
 
         dv = trained_pipeline.named_steps['dv']
-        feature_selection = trained_pipeline.named_steps['feature_selection']
+
+        # If we do not have feature selection in the pipeline, just return the pipeline as is
+        try:
+            feature_selection = trained_pipeline.named_steps['feature_selection']
+        except KeyError:
+            return trained_pipeline
         feature_selection_mask = feature_selection.support_mask
         dv.restrict(feature_selection_mask)
 
@@ -316,7 +324,7 @@ class Predictor(object):
         return trained_pipeline_without_feature_selection
 
 
-    def train_ensemble(self, data, ensemble_training_list, X_test=None, y_test=None, ensemble_method='median'):
+    def train_ensemble(self, data, ensemble_training_list, X_test=None, y_test=None, ensemble_method='median', data_for_final_ensembling=None):
 
         self.ensemble_predictors = []
 
@@ -329,6 +337,16 @@ class Predictor(object):
         else:
             scoring = utils.rmse_scoring
             self._scorer = scoring
+
+        # ################################
+        # If we're using machine learning to assemble our final ensemble, and we don't have data for it from the user, split out data here
+        # ################################
+        if ensemble_method in ['machine learning', 'ml', 'machine_learning'] and data_for_final_ensembling is None:
+            # Just grab the last 20% of the dataset in the order it was given to us
+            ensemble_idx = int(0.7 * len(data))
+            data_for_final_ensembling = data[ensemble_idx:]
+            data = data[:ensemble_idx]
+
 
 
         # ################################
@@ -350,7 +368,12 @@ class Predictor(object):
 
             data_selection_func = training_params.pop('data_selection_func', None)
             if callable(data_selection_func):
-                this_rounds_data = data_selection_func(this_rounds_data)
+                try:
+                    # TODO: figure out how to see if this function is expecting to take in the name argument or not
+                    this_rounds_data = data_selection_func(this_rounds_data, name)
+                except TypeError:
+                    this_rounds_data = data_selection_func(this_rounds_data)
+
 
             training_params['raw_training_data'] = this_rounds_data
 
@@ -377,10 +400,6 @@ class Predictor(object):
         pool.close()
         pool.join()
 
-
-        # Create an instance of an Ensemble object that will get predictions from all the trained subpredictors
-        self.trained_pipeline = utils.Ensemble(ensemble_predictors=self.ensemble_predictors, type_of_estimator=self.type_of_estimator, method=ensemble_method)
-
         # ################################
         # Print scoring information for each trained subpredictor
         # ################################
@@ -404,8 +423,35 @@ class Predictor(object):
             pool.join()
 
 
+        # ################################
+        # Ensemble together our trained subpredictors, either using simple averaging, or training a new machine learning model to pick from amongst them
+        # ################################
 
-    def train(self, raw_training_data, user_input_func=None, optimize_entire_pipeline=False, optimize_final_model=None, write_gs_param_results_to_file=True, perform_feature_selection=True, verbose=True, X_test=None, y_test=None, print_training_summary_to_viewer=True, ml_for_analytics=True, only_analytics=False, compute_power=3, take_log_of_y=None, model_names=None, perform_feature_scaling=True):
+        if ensemble_method in ['machine learning', 'ml', 'machine_learning']:
+            ensembler = utils.Ensemble(ensemble_predictors=self.ensemble_predictors, type_of_estimator=self.type_of_estimator, method=ensemble_method)
+
+
+            ml_predictor = Predictor(type_of_estimator=self.type_of_estimator, column_descriptions=self.column_descriptions, name=self.name)
+
+            print('Using machine learning to ensemble together a bunch of trained estimators!')
+            data_for_final_ensembling = data_for_final_ensembling.reset_index()
+            ml_predictor.train(raw_training_data=data_for_final_ensembling, ensembler=ensembler, perform_feature_selection=False)
+
+
+            # predictions_on_ensemble_data = ensembler._get_all_predictions(data_for_final_ensembling)
+            # data_for_final_ensembling = pd.concat([data_for_final_ensembling, predictions_on_ensemble_data], axis=1)
+
+            self.trained_pipeline = ml_predictor
+
+        else:
+
+            # Create an instance of an Ensemble object that will get predictions from all the trained subpredictors
+            self.trained_pipeline = utils.Ensemble(ensemble_predictors=self.ensemble_predictors, type_of_estimator=self.type_of_estimator, method=ensemble_method)
+
+
+
+
+    def train(self, raw_training_data, user_input_func=None, optimize_entire_pipeline=False, optimize_final_model=None, write_gs_param_results_to_file=True, perform_feature_selection=True, verbose=True, X_test=None, y_test=None, print_training_summary_to_viewer=True, ml_for_analytics=True, only_analytics=False, compute_power=3, take_log_of_y=None, model_names=None, perform_feature_scaling=True, ensembler=None):
 
         self.user_input_func = user_input_func
         self.optimize_final_model = optimize_final_model
@@ -422,6 +468,7 @@ class Predictor(object):
             self.take_log_of_y = take_log_of_y
         self.model_names = model_names
         self.perform_feature_scaling = perform_feature_scaling
+        self.ensembler = ensembler
 
 
         if verbose:
@@ -778,7 +825,7 @@ class Predictor(object):
                     return self._scorer(y_test, predictions)
                 elif advanced_scoring:
                     score, probas = self._scorer(self.trained_pipeline, X_test, y_test, advanced_scoring=advanced_scoring)
-                    utils.advanced_scoring_classifiers(probas, y_test)
+                    utils.advanced_scoring_classifiers(probas, y_test, name=self.name)
                     return score
                 else:
                     return self._scorer(self.trained_pipeline, X_test, y_test, advanced_scoring=advanced_scoring)
@@ -787,58 +834,8 @@ class Predictor(object):
 
 
     def save(self, file_name='auto_ml_saved_pipeline.pkl', verbose=True):
-        # with bz2.BZ2File(file_name, 'wb') as open_file_name:
-        #     pickle.dump(self.trained_pipeline, open_file_name, protocol=pickle.HIGHEST_PROTOCOL)
         with open(file_name, 'wb') as open_file_name:
             pickle.dump(self.trained_pipeline, open_file_name, protocol=pickle.HIGHEST_PROTOCOL)
-        # auto_ml_saved_pipeline_pbz2_start_time = datetime.datetime.now()
-        # file_name='auto_ml_saved_pipeline.pbz2'
-        # with bz2.BZ2File(file_name, 'wb') as open_file_name:
-        #     pickle.dump(self.trained_pipeline, open_file_name, protocol=pickle.HIGHEST_PROTOCOL)
-        # auto_ml_saved_pipeline_pbz2_end_time = datetime.datetime.now()
-        # print('auto_ml_saved_pipeline.pbz2 total file write time')
-        # print(auto_ml_saved_pipeline_pbz2_end_time - auto_ml_saved_pipeline_pbz2_start_time)
-
-        # auto_ml_saved_pipeline_pgz_start_time = datetime.datetime.now()
-        # file_name='auto_ml_saved_pipeline.pgz'
-        # with gzip.GzipFile(file_name, 'wb') as open_file_name:
-        #     pickle.dump(self.trained_pipeline, open_file_name, protocol=pickle.HIGHEST_PROTOCOL)
-        # auto_ml_saved_pipeline_pgz_end_time = datetime.datetime.now()
-        # print('auto_ml_saved_pipeline.pgz total file write time')
-        # print(auto_ml_saved_pipeline_pgz_end_time - auto_ml_saved_pipeline_pgz_start_time)
-
-        # auto_ml_saved_pipeline_pkl_start_time = datetime.datetime.now()
-        # file_name='auto_ml_saved_pipeline.pkl'
-        # with open(file_name, 'wb') as open_file_name:
-        #     pickle.dump(self.trained_pipeline, open_file_name, protocol=pickle.HIGHEST_PROTOCOL)
-        # auto_ml_saved_pipeline_pkl_end_time = datetime.datetime.now()
-        # print('auto_ml_saved_pipeline.pkl total file write time')
-        # print(auto_ml_saved_pipeline_pkl_end_time - auto_ml_saved_pipeline_pkl_start_time)
-
-        # auto_ml_saved_pipeline_w_only_pbz2_start_time = datetime.datetime.now()
-        # file_name='auto_ml_saved_pipeline_w_only.pbz2'
-        # with bz2.BZ2File(file_name, 'w') as open_file_name:
-        #     pickle.dump(self.trained_pipeline, open_file_name, protocol=pickle.HIGHEST_PROTOCOL)
-        # auto_ml_saved_pipeline_w_only_pbz2_end_time = datetime.datetime.now()
-        # print('auto_ml_saved_pipeline_w_only.pbz2 total file write time')
-        # print(auto_ml_saved_pipeline_w_only_pbz2_end_time - auto_ml_saved_pipeline_w_only_pbz2_start_time)
-
-        # auto_ml_saved_pipeline_w_only_pgz_start_time = datetime.datetime.now()
-        # file_name='auto_ml_saved_pipeline_w_only.pgz'
-        # with gzip.GzipFile(file_name, 'w') as open_file_name:
-        #     pickle.dump(self.trained_pipeline, open_file_name, protocol=pickle.HIGHEST_PROTOCOL)
-        # auto_ml_saved_pipeline_w_only_pgz_end_time = datetime.datetime.now()
-        # print('auto_ml_saved_pipeline_w_only.pgz total file write time')
-        # print(auto_ml_saved_pipeline_w_only_pgz_end_time - auto_ml_saved_pipeline_w_only_pgz_start_time)
-
-        # auto_ml_saved_pipeline_w_only_pkl_start_time = datetime.datetime.now()
-        # file_name='auto_ml_saved_pipeline_w_only.pkl'
-        # with open(file_name, 'w') as open_file_name:
-        #     pickle.dump(self.trained_pipeline, open_file_name, protocol=pickle.HIGHEST_PROTOCOL)
-        # auto_ml_saved_pipeline_w_only_pkl_end_time = datetime.datetime.now()
-        # print('auto_ml_saved_pipeline_w_only.pkl total file write time')
-        # print(auto_ml_saved_pipeline_w_only_pkl_end_time - auto_ml_saved_pipeline_w_only_pkl_start_time)
-
 
         if verbose:
             print('\n\nWe have saved the trained pipeline to a filed called "auto_ml_saved_pipeline.pkl"')
@@ -855,7 +852,7 @@ class Predictor(object):
 
             print('\n\nWhen passing in new data to get predictions on, columns that were not present (or were not found to be useful) in the training data will be silently ignored.')
             print('It is worthwhile to make sure that you feed in all the most useful data points though, to make sure you can get the highest quality predictions.')
-            print('\nThese are the most important features that were fed into the model:')
+            # print('\nThese are the most important features that were fed into the model:')
 
             # if self.ml_for_analytics and self.trained_pipeline.named_steps['final_model'].model_name in ('LogisticRegression', 'RidgeClassifier', 'LinearRegression', 'Ridge'):
             #     self._print_ml_analytics_results_regression()
