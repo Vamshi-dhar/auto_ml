@@ -324,8 +324,10 @@ class Predictor(object):
         return trained_pipeline_without_feature_selection
 
 
-    def train_ensemble(self, data, ensemble_training_list, X_test=None, y_test=None, ensemble_method='median', data_for_final_ensembling=None):
+    def train_ensemble(self, data, ensemble_training_list, X_test=None, y_test=None, ensemble_method='median', data_for_final_ensembling=None, find_best_method=False):
 
+        if y_test is not None:
+            y_test = list(y_test)
         self.ensemble_predictors = []
 
         self.is_ensemble = True
@@ -342,11 +344,13 @@ class Predictor(object):
         # If we're using machine learning to assemble our final ensemble, and we don't have data for it from the user, split out data here
         # ################################
         if ensemble_method in ['machine learning', 'ml', 'machine_learning'] and data_for_final_ensembling is None:
+
+
+
             # Just grab the last 20% of the dataset in the order it was given to us
             ensemble_idx = int(0.7 * len(data))
             data_for_final_ensembling = data[ensemble_idx:]
             data = data[:ensemble_idx]
-
 
 
         # ################################
@@ -370,9 +374,11 @@ class Predictor(object):
             if callable(data_selection_func):
                 try:
                     # TODO: figure out how to see if this function is expecting to take in the name argument or not
-                    this_rounds_data = data_selection_func(this_rounds_data, name)
+                    this_rounds_data = data_selection_func(data, name)
                 except TypeError:
-                    this_rounds_data = data_selection_func(this_rounds_data)
+                    this_rounds_data = data_selection_func(data)
+            else:
+                this_rounds_data = data
 
 
             training_params['raw_training_data'] = this_rounds_data
@@ -394,7 +400,7 @@ class Predictor(object):
             pool.restart()
         except AssertionError as e:
             pass
-        self.ensemble_predictors = pool.map(train_one_ensemble_subpredictor, ensemble_training_list)
+        self.ensemble_predictors = pool.map(train_one_ensemble_subpredictor, ensemble_training_list, chunksize=1000)
         self.ensemble_predictors = list(self.ensemble_predictors)
         # Once we have gotten all we need from the pool, close it so it's not taking up unnecessary memory
         pool.close()
@@ -417,7 +423,7 @@ class Predictor(object):
                 pool.restart()
             except AssertionError as e:
                 pass
-            pool.map(lambda predictor: score_predictor(predictor, X_test, y_test), self.ensemble_predictors)
+            pool.map(lambda predictor: score_predictor(predictor, X_test, y_test), self.ensemble_predictors, chunksize=1000)
             # Once we have gotten all we need from the pool, close it so it's not taking up unnecessary memory
             pool.close()
             pool.join()
@@ -435,7 +441,12 @@ class Predictor(object):
 
             print('Using machine learning to ensemble together a bunch of trained estimators!')
             data_for_final_ensembling = data_for_final_ensembling.reset_index()
-            ml_predictor.train(raw_training_data=data_for_final_ensembling, ensembler=ensembler, perform_feature_selection=False)
+            if self.type_of_estimator == 'regressor':
+                model_names = ['RandomForestRegressor', 'LinearRegression', 'ExtraTreesRegressor', 'Ridge', 'GradientBoostingRegressor', 'AdaBoostRegressor', 'Lasso', 'ElasticNet', 'LassoLars', 'OrthogonalMatchingPursuit', 'BayesianRidge', 'SGDRegressor']
+                # model_names = ['RandomForestRegressor']
+            else:
+                model_names = ['RandomForestClassifier']
+            ml_predictor.train(raw_training_data=data_for_final_ensembling, ensembler=ensembler, perform_feature_selection=False, model_names=model_names, X_test=X_test, y_test=y_test)
 
 
             # predictions_on_ensemble_data = ensembler._get_all_predictions(data_for_final_ensembling)
@@ -443,10 +454,17 @@ class Predictor(object):
 
             self.trained_pipeline = ml_predictor
 
+            if find_best_method == True:
+                ensembler.find_best_ensemble_method(df=X_test, actuals=y_test)
+
         else:
 
             # Create an instance of an Ensemble object that will get predictions from all the trained subpredictors
             self.trained_pipeline = utils.Ensemble(ensemble_predictors=self.ensemble_predictors, type_of_estimator=self.type_of_estimator, method=ensemble_method)
+
+            if find_best_method == True:
+                self.trained_pipeline.find_best_ensemble_method(df=X_test, actuals=y_test)
+
 
 
 
@@ -640,26 +658,23 @@ class Predictor(object):
             elif self.ml_for_analytics and model_name in ['RandomForestClassifier', 'RandomForestRegressor', 'XGBClassifier', 'XGBRegressor', 'GradientBoostingRegressor', 'GradientBoostingClassifier']:
                 self._print_ml_analytics_results_random_forest()
 
-            if (self.X_test) is not None and (self.y_test) is not None:
-                if not self.X_test.empty and not self.y_test.empty:
+            if self.X_test is not None and self.y_test is not None:
+                if len(self.X_test) == len(self.y_test):
                     print('Calculating score on holdout data')
                     holdout_data_score = self.score(self.X_test, self.y_test)
                     print('The results from the X_test and y_test data passed into ml_for_analytics (which were not used for training- true holdout data)')
                     print(self.output_column + ':')
                     print(holdout_data_score)
+                    try:
+                        # We want our score on the holdout data to be the first thing in our pipeline results tuple. This is what we will be selecting our best model from.
+                        pipeline_results.prepend(holdout_data_score)
+                    except:
+                        # If we don't have pipeline_results (if we did not fit GSCV), then pass
+                        pass
+                else:
+                    print('X_test and y_test must be the same length')
 
 
-            if self.X_test and self.y_test:
-                print('The results from the X_test and y_test data passed into ml_for_analytics (which were not used for training- true holdout data) are:')
-                holdout_data_score = self.score(self.X_test, self.y_test)
-                print(holdout_data_score)
-
-                try:
-                    # We want our score on the holdout data to be the first thing in our pipeline results tuple. This is what we will be selecting our best model from.
-                    pipeline_results.prepend(holdout_data_score)
-                except:
-                    # If we don't have pipeline_results (if we did not fit GSCV), then pass
-                    pass
 
             if self.fit_grid_search:
                 self.grid_search_pipelines.append(pipeline_results)
@@ -818,7 +833,8 @@ class Predictor(object):
 
         if self._scorer is not None:
             if self.type_of_estimator == 'regressor':
-                return self._scorer(self.trained_pipeline, X_test, y_test, self.took_log_of_y, advanced_scoring=advanced_scoring, verbose=verbose)
+                return self._scorer(self.trained_pipeline, X_test, y_test, self.took_log_of_y, advanced_scoring=advanced_scoring, verbose=verbose, name=self.name)
+
             elif self.type_of_estimator == 'classifier':
                 if self._scorer == accuracy_score:
                     predictions = self.trained_pipeline.predict(X_test)

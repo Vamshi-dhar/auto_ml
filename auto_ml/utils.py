@@ -552,9 +552,9 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
             X_fit = X
 
 
-        # if self.model_name[:12] == 'DeepLearning':
-        #     if scipy.sparse.issparse(X_fit):
-        #         X_fit = X_fit.todense()
+        if self.model_name[:12] == 'DeepLearning' or self.model_name in ['BayesianRidge', 'LassoLars', 'OrthogonalMatchingPursuit', 'ARDRegression']:
+            if scipy.sparse.issparse(X_fit):
+                X_fit = X_fit.todense()
 
         #     num_cols = X_fit.shape[1]
         #     kwargs = {
@@ -592,6 +592,28 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
             return self.model.score(X, y)
 
 
+    def get_predictions(self, X):
+        if self.type_of_estimator == 'classifier':
+            try:
+                return self.model.predict_proba(X)
+            except:
+                pass
+        else:
+        # except AttributeError:
+            # print('This model has no predict_proba method. Returning results of .predict instead.')
+            predictions = self.model.predict(X)
+            if self.type_of_estimator == 'classifier':
+                tupled_predictions = []
+                for prediction in predictions:
+                    if prediction == 1:
+                        tupled_predictions.append([0,1])
+                    else:
+                        tupled_predictions.append([1,0])
+                predictions = tupled_predictions
+
+            return predictions
+
+
     def predict_proba(self, X):
 
         if self.model_name[:3] == 'XGB' and scipy.sparse.issparse(X):
@@ -602,18 +624,40 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
         if self.model_name[:16] == 'GradientBoosting' and scipy.sparse.issparse(X):
             X = X.todense()
 
-        try:
-            return self.model.predict_proba(X)
-        except AttributeError:
-            # print('This model has no predict_proba method. Returning results of .predict instead.')
-            raw_predictions = self.model.predict(X)
-            tupled_predictions = []
-            for prediction in raw_predictions:
-                if prediction == 1:
-                    tupled_predictions.append([0,1])
-                else:
-                    tupled_predictions.append([1,0])
-            return tupled_predictions
+        # Get predictions in parallel if we have a big enough X
+        # Open a new multiprocessing pool
+
+        print('X.shape')
+        print(X.shape)
+        if X.shape[0] > 100:
+            print('heard yes!')
+            # TODO: eventually replace 8 with ncpus
+            split_X = np.split(X, 8)
+            pool = pathos.multiprocessing.ProcessPool()
+
+            # Since we may have already closed the pool, try to restart it
+            try:
+                pool.restart()
+            except AssertionError as e:
+                pass
+
+            predictions = pool.map(self.get_predictions, split_X)
+            predictions = list(predictions)
+
+            # Once we have gotten all we need from the pool, close it so it's not taking up unnecessary memory
+            pool.close()
+            pool.join()
+
+            all_predictions = []
+            for prediction_list in predictions:
+                all_predictions += prediction_list
+            predictions = all_predictions
+
+        else:
+            predictions = self.get_predictions(X)
+
+        return predictions
+
 
 
     def predict(self, X):
@@ -629,13 +673,41 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
         else:
             X_predict = X
 
-        prediction = self.model.predict(X_predict)
+        print('X.shape')
+        print(X.shape)
+        if X.shape[0] > 100:
+            print('heard yes!')
+            # TODO: eventually replace 8 with ncpus
+            split_X = np.array_split(X_predict, 8)
+            pool = pathos.multiprocessing.ProcessPool()
+
+            # Since we may have already closed the pool, try to restart it
+            try:
+                pool.restart()
+            except AssertionError as e:
+                pass
+
+            print('about to get predictions in parallel')
+            predictions = pool.map(self.get_predictions, split_X)
+            predictions = list(predictions)
+
+            # Once we have gotten all we need from the pool, close it so it's not taking up unnecessary memory
+            pool.close()
+            pool.join()
+
+            all_predictions = []
+            for prediction_list in predictions:
+                all_predictions += list(prediction_list)
+            predictions = all_predictions
+
+        else:
+            predictions = self.get_predictions(X)
         # Handle cases of getting a prediction for a single item.
         # It makes a cleaner interface just to get just the single prediction back, rather than a list with the prediction hidden inside.
-        if len(prediction) == 1:
-            return prediction[0]
+        if len(predictions) == 1:
+            return predictions[0]
         else:
-            return prediction
+            return predictions
 
 
 def advanced_scoring_classifiers(probas, actuals, name=None):
@@ -678,7 +750,7 @@ def advanced_scoring_classifiers(probas, actuals, name=None):
 
     print('\n\n')
 
-def calculate_and_print_differences(predictions, actuals):
+def calculate_and_print_differences(predictions, actuals, name=None):
     pos_differences = []
     neg_differences = []
     # Technically, we're ignoring cases where we are spot on
@@ -688,6 +760,9 @@ def calculate_and_print_differences(predictions, actuals):
             pos_differences.append(difference)
         elif difference < 0:
             neg_differences.append(difference)
+
+    if name != None:
+        print(name)
     print('Count of positive differences (prediction > actual):')
     print(len(pos_differences))
     print('Count of negative differences:')
@@ -700,9 +775,11 @@ def calculate_and_print_differences(predictions, actuals):
         print(sum(neg_differences) * 1.0 / len(neg_differences))
 
 
-def advanced_scoring_regressors(predictions, actuals, verbose=2):
+def advanced_scoring_regressors(predictions, actuals, verbose=2, name=None):
 
     print('\n\n***********************************************')
+    if name != None:
+        print(name)
     print('Advanced scoring metrics for the trained regression model on this particular dataset:\n')
 
     # 1. overall RMSE
@@ -731,7 +808,7 @@ def advanced_scoring_regressors(predictions, actuals, verbose=2):
     print(r2_score(actuals, predictions))
 
     # 5. pos and neg differences
-    calculate_and_print_differences(predictions, actuals)
+    calculate_and_print_differences(predictions, actuals, name=name)
     # 6.
 
     actuals_preds = zip(actuals, predictions)
@@ -898,7 +975,7 @@ class FeatureSelectionTransformer(BaseEstimator, TransformerMixin):
             return pruned_X
 
 
-def rmse_scoring(estimator, X, y, took_log_of_y=False, advanced_scoring=False, verbose=2):
+def rmse_scoring(estimator, X, y, took_log_of_y=False, advanced_scoring=False, verbose=2, name=None):
     if isinstance(estimator, GradientBoostingRegressor):
         X = X.toarray()
     predictions = estimator.predict(X)
@@ -909,7 +986,7 @@ def rmse_scoring(estimator, X, y, took_log_of_y=False, advanced_scoring=False, v
     if advanced_scoring == True:
         if hasattr(estimator, 'name'):
             print(estimator.name)
-        advanced_scoring_regressors(predictions, y, verbose=verbose)
+        advanced_scoring_regressors(predictions, y, verbose=verbose, name=name)
     return - 1 * rmse
 
 
@@ -1096,7 +1173,7 @@ class Ensemble(object):
         except AssertionError as e:
             pass
 
-        predictions_from_all_estimators = pool.map(lambda predictor: get_predictions_for_one_estimator(predictor, df), self.ensemble_predictors)
+        predictions_from_all_estimators = pool.map(lambda predictor: get_predictions_for_one_estimator(predictor, df), self.ensemble_predictors, chunksize=1000)
         predictions_from_all_estimators = list(predictions_from_all_estimators)
 
         # Once we have gotten all we need from the pool, close it so it's not taking up unnecessary memory
@@ -1123,12 +1200,16 @@ class Ensemble(object):
         for row_idx, row in predictions_df.iterrows():
             row_results = {}
 
-            num_classes = len(row[0])
-            for class_prediction_idx in range(num_classes):
-                class_preds = [estimator_prediction[class_prediction_idx] for estimator_prediction in row]
+            if self.type_of_estimator == 'classifier':
+                num_classes = len(row[0])
+                for class_prediction_idx in range(num_classes):
+                    class_preds = [estimator_prediction[class_prediction_idx] for estimator_prediction in row]
 
-                class_summarized_predictions = self.get_summary_stats_from_row(class_preds, prefix='subpredictor_class=' + str(class_prediction_idx))
-                row_results.update(class_summarized_predictions)
+                    class_summarized_predictions = self.get_summary_stats_from_row(class_preds, prefix='subpredictor_class=' + str(class_prediction_idx))
+                    row_results.update(class_summarized_predictions)
+            else:
+                row_summarized = self.get_summary_stats_from_row(row, prefix='subpredictors_')
+                row_results.update(row_summarized)
 
             summarized_predictions.append(row_results)
 
@@ -1207,7 +1288,25 @@ class Ensemble(object):
         return summarized_predictions
 
 
-    # def find_best_ensemble_method()
+
+    # ################################
+    # Find the best enemble method that is not ml
+    # ################################
+    def find_best_ensemble_method(self, df, actuals):
+        predictions_df = self.get_all_predictions(df)
+
+        summary_df = self.get_summary_stats(predictions_df)
+
+        for method in ['min', 'max', 'average', 'median']:
+            print(method)
+            for col in summary_df.columns:
+                if method in col:
+                    if self.type_of_estimator == 'regressor':
+                        advanced_scoring_regressors(summary_df[col], actuals, name=method)
+                    else:
+                        advanced_scoring_classifiers(summary_df[col], actuals)
+
+
 
 
 class AddEnsembledPredictions(BaseEstimator, TransformerMixin):
@@ -1251,7 +1350,7 @@ class AddEnsembledPredictions(BaseEstimator, TransformerMixin):
             # print('predictions')
             # print(predictions)
 
-        X = X.reset_index()
+        X = X.reset_index(drop=True)
         # X = pd.concat([X, predictions, summarized_predictions], axis=1)
         X = pd.concat([predictions, summarized_predictions], axis=1)
         print('X.shape at the end of transform')
