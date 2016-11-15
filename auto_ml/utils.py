@@ -326,6 +326,7 @@ class BasicDataCleaning(BaseEstimator, TransformerMixin):
                 elif col_desc in vals_to_drop:
                     pass
                     # del X[key]
+            return dict_copy
 
         else:
             for key in X.columns:
@@ -627,12 +628,12 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
         # Get predictions in parallel if we have a big enough X
         # Open a new multiprocessing pool
 
-        print('X.shape')
-        print(X.shape)
         if X.shape[0] > 100:
-            print('heard yes!')
+            # print('heard yes!')
             # TODO: eventually replace 8 with ncpus
-            split_X = np.split(X, 8)
+            if scipy.sparse.issparse(X):
+                X = X.todense()
+            split_X = np.array_split(X, indices_or_sections=8, axis=0)
             pool = pathos.multiprocessing.ProcessPool()
 
             # Since we may have already closed the pool, try to restart it
@@ -641,17 +642,25 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
             except AssertionError as e:
                 pass
 
-            predictions = pool.map(self.get_predictions, split_X)
-            predictions = list(predictions)
+            try:
+                # AssertionError: daemonic processes are not allowed to have children
+                # When we get predictions for all supbredictors, we do that in parallel
+                # So when we try to get predictions for a single subpredictor, doing that in parallel nested inside of the already parallelized all subpredictors, we encounter an error.
+                predictions = pool.map(self.get_predictions, split_X)
+                predictions = list(predictions)
 
-            # Once we have gotten all we need from the pool, close it so it's not taking up unnecessary memory
-            pool.close()
-            pool.join()
+                # Once we have gotten all we need from the pool, close it so it's not taking up unnecessary memory
+                pool.close()
+                pool.join()
 
-            all_predictions = []
-            for prediction_list in predictions:
-                all_predictions += prediction_list
-            predictions = all_predictions
+                all_predictions = []
+                for prediction_list in predictions:
+                    all_predictions += list(prediction_list)
+                predictions = all_predictions
+
+            except AssertionError as e:
+                predictions = self.get_predictions(X)
+
 
         else:
             predictions = self.get_predictions(X)
@@ -665,20 +674,21 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
         if self.model_name[:3] == 'XGB' and scipy.sparse.issparse(X):
             ones = [[1] for x in range(X.shape[0])]
             # Trying to force XGBoost to play nice with sparse matrices
-            X_predict = scipy.sparse.hstack((X, ones))
+            X = scipy.sparse.hstack((X, ones))
 
         elif (self.model_name[:16] == 'GradientBoosting' or self.model_name[:12] == 'DeepLearning') and scipy.sparse.issparse(X):
-            X_predict = X.todense()
+            X = X.todense()
 
-        else:
-            X_predict = X
 
-        print('X.shape')
-        print(X.shape)
+        # Get predictions in parallel if we have a big enough X
+        # Open a new multiprocessing pool
+
         if X.shape[0] > 100:
-            print('heard yes!')
+            # print('heard yes!')
             # TODO: eventually replace 8 with ncpus
-            split_X = np.array_split(X_predict, 8)
+            if scipy.sparse.issparse(X):
+                X = X.todense()
+            split_X = np.array_split(X, indices_or_sections=8, axis=0)
             pool = pathos.multiprocessing.ProcessPool()
 
             # Since we may have already closed the pool, try to restart it
@@ -687,21 +697,29 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
             except AssertionError as e:
                 pass
 
-            print('about to get predictions in parallel')
-            predictions = pool.map(self.get_predictions, split_X)
-            predictions = list(predictions)
+            try:
+                # AssertionError: daemonic processes are not allowed to have children
+                # When we get predictions for all supbredictors, we do that in parallel
+                # So when we try to get predictions for a single subpredictor, doing that in parallel nested inside of the already parallelized all subpredictors, we encounter an error.
+                predictions = pool.map(self.get_predictions, split_X)
+                predictions = list(predictions)
 
-            # Once we have gotten all we need from the pool, close it so it's not taking up unnecessary memory
-            pool.close()
-            pool.join()
+                # Once we have gotten all we need from the pool, close it so it's not taking up unnecessary memory
+                pool.close()
+                pool.join()
 
-            all_predictions = []
-            for prediction_list in predictions:
-                all_predictions += list(prediction_list)
-            predictions = all_predictions
+                all_predictions = []
+                for prediction_list in predictions:
+                    all_predictions += list(prediction_list)
+                predictions = all_predictions
+
+            except AssertionError as e:
+                predictions = self.get_predictions(X)
+
 
         else:
             predictions = self.get_predictions(X)
+
         # Handle cases of getting a prediction for a single item.
         # It makes a cleaner interface just to get just the single prediction back, rather than a list with the prediction hidden inside.
         if len(predictions) == 1:
@@ -1137,6 +1155,18 @@ def safely_drop_columns(df, cols_to_drop):
     return df
 
 
+def get_predictions_for_one_estimator(estimator, df):
+    estimator_name = estimator.name
+
+    if estimator.type_of_estimator == 'regressor':
+        predictions = estimator.predict(df)
+    else:
+        # For classifiers
+        predictions = list(estimator.predict_proba(df))
+
+    return {estimator_name: predictions}
+
+
 class Ensemble(object):
 
     def __init__(self, ensemble_predictors, type_of_estimator, method='average'):
@@ -1152,42 +1182,40 @@ class Ensemble(object):
 
     def get_all_predictions(self, df):
 
-        def get_predictions_for_one_estimator(estimator, df):
-            estimator_name = estimator.name
-
-            if self.type_of_estimator == 'regressor':
-                predictions = estimator.predict(df)
-            else:
-                # For classifiers
-                predictions = list(estimator.predict_proba(df))
-
-            return {estimator_name: predictions}
-
+        def func_for_mapping(predictor):
+            return get_predictions_for_one_estimator(predictor, df)
 
         # Open a new multiprocessing pool
         pool = pathos.multiprocessing.ProcessPool()
 
+        pool.join()
+        pool = pathos.multiprocessing.ProcessPool()
         # Since we may have already closed the pool, try to restart it
         try:
             pool.restart()
         except AssertionError as e:
             pass
 
-        predictions_from_all_estimators = pool.map(lambda predictor: get_predictions_for_one_estimator(predictor, df), self.ensemble_predictors, chunksize=1000)
+        # predictions_from_all_estimators = pool.map(lambda predictor: get_predictions_for_one_estimator(predictor, df), self.ensemble_predictors, chunksize=1000)
+        # predictions_from_all_estimators = pool.map(func_for_mapping, self.ensemble_predictors, chunksize=1000)
+        predictions_from_all_estimators = map(func_for_mapping, self.ensemble_predictors)
         predictions_from_all_estimators = list(predictions_from_all_estimators)
 
         # Once we have gotten all we need from the pool, close it so it's not taking up unnecessary memory
         pool.close()
         pool.join()
 
-
         results = {}
         for result_dict in predictions_from_all_estimators:
             results.update(result_dict)
 
-        predictions_df = pd.DataFrame.from_dict(results, orient='columns')
+        # if this is a single row we are getting predictions from, just return a dictionary with single values for all the predictions
+        if isinstance(df, dict):
+            return results
+        else:
+            predictions_df = pd.DataFrame.from_dict(results, orient='columns')
 
-        return predictions_df
+            return predictions_df
 
     # Gets summary stats on a set of predictions
     def get_summary_stats(self, predictions_df):
@@ -1242,19 +1270,33 @@ class Ensemble(object):
 
         predictions_df = self.get_all_predictions(df)
 
-        summarized_predictions = []
-        for idx, row in predictions_df.iterrows():
+        # If this is just a single dictionary we're getting predictions from:
+        if isinstance(df, dict):
+            # predictions_df is just a dictionary where all the values are the predicted values from one of our subpredictors. we'll want that as a list
+            predicted_vals = predictions_df.values()
             if self.method == 'median':
-                summarized_predictions.append(np.median(row))
+                return np.median(predicted_vals)
             elif self.method == 'average' or self.method == 'mean':
-                summarized_predictions.append(np.average(row))
+                return np.average(predicted_vals)
             elif self.method == 'max':
-                summarized_predictions.append(np.max(row))
+                return np.max(predicted_vals)
             elif self.method == 'min':
-                summarized_predictions.append(np.min(row))
+                return np.min(predicted_vals)
 
 
-        return summarized_predictions
+        else:
+            summarized_predictions = []
+            for idx, row in predictions_df.iterrows():
+                if self.method == 'median':
+                    summarized_predictions.append(np.median(row))
+                elif self.method == 'average' or self.method == 'mean':
+                    summarized_predictions.append(np.average(row))
+                elif self.method == 'max':
+                    summarized_predictions.append(np.max(row))
+                elif self.method == 'min':
+                    summarized_predictions.append(np.min(row))
+
+            return summarized_predictions
 
     # ################################
     # Public API to get a propbability predictions from each row, where each row will have a list of values, representing the probability of that class

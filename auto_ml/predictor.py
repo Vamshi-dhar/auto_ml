@@ -10,6 +10,7 @@ try:
 except:
     import pickle
 
+import dill
 import pandas as pd
 import pathos
 
@@ -423,6 +424,8 @@ class Predictor(object):
                 pool.restart()
             except AssertionError as e:
                 pass
+
+            # All we're doing here is printing info, so we don't have any results to save
             pool.map(lambda predictor: score_predictor(predictor, X_test, y_test), self.ensemble_predictors, chunksize=1000)
             # Once we have gotten all we need from the pool, close it so it's not taking up unnecessary memory
             pool.close()
@@ -851,10 +854,12 @@ class Predictor(object):
 
     def save(self, file_name='auto_ml_saved_pipeline.pkl', verbose=True):
         with open(file_name, 'wb') as open_file_name:
-            pickle.dump(self.trained_pipeline, open_file_name, protocol=pickle.HIGHEST_PROTOCOL)
+            # pickle.dump(self.trained_pipeline, open_file_name, protocol=pickle.HIGHEST_PROTOCOL)
+            dill.dump(self.trained_pipeline, open_file_name)
 
         if verbose:
-            print('\n\nWe have saved the trained pipeline to a filed called "auto_ml_saved_pipeline.pkl"')
+            print('\n\nWe have saved the trained pipeline to a filed called:')
+            print(open_file_name)
             print('It is saved in the directory: ')
             print(os.getcwd())
             print('To use it to get predictions, please follow the following flow (adjusting for your own uses as necessary:\n\n')
@@ -875,6 +880,6 @@ class Predictor(object):
             # elif self.ml_for_analytics and self.trained_pipeline.named_steps['final_model'].model_name in ['RandomForestClassifier', 'RandomForestRegressor', 'XGBClassifier', 'XGBRegressor']:
             #     self._print_ml_analytics_results_random_forest()
 
-        return os.getcwd() + file_name
+        return os.path.join(os.getcwd(), file_name)
 
 
