@@ -326,6 +326,7 @@ class BasicDataCleaning(BaseEstimator, TransformerMixin):
                 elif col_desc in vals_to_drop:
                     pass
                     # del X[key]
+            return dict_copy
 
         else:
             for key in X.columns:
@@ -471,6 +472,7 @@ def add_date_features_dict(row, date_col):
 #     return model
 
 
+
 def get_model_from_name(model_name):
     model_map = {
         # Classifiers
@@ -529,12 +531,13 @@ def get_model_from_name(model_name):
 class FinalModelATC(BaseEstimator, TransformerMixin):
 
 
-    def __init__(self, model, model_name, ml_for_analytics=False, type_of_estimator='classifier', output_column=None):
+    def __init__(self, model, model_name, ml_for_analytics=False, type_of_estimator='classifier', output_column=None, name=None):
 
         self.model = model
         self.model_name = model_name
         self.ml_for_analytics = ml_for_analytics
         self.type_of_estimator = type_of_estimator
+        self.name = name
 
 
         if self.type_of_estimator == 'classifier':
@@ -1087,7 +1090,7 @@ class Ensemble(object):
     def get_all_predictions(self, df):
 
         def get_predictions_for_one_estimator(estimator, df):
-            estimator_name = estimator.name
+            estimator_name = estimator.named_steps['final_model'].name
 
             if self.type_of_estimator == 'regressor':
                 predictions = estimator.predict(df)
@@ -1125,9 +1128,13 @@ class Ensemble(object):
         for result_dict in predictions_from_all_estimators:
             results.update(result_dict)
 
-        predictions_df = pd.DataFrame.from_dict(results, orient='columns')
+        # if this is a single row we are getting predictions from, just return a dictionary with single values for all the predictions
+        if isinstance(df, dict):
+            return results
+        else:
+            predictions_df = pd.DataFrame.from_dict(results, orient='columns')
 
-        return predictions_df
+            return predictions_df
 
     # Gets summary stats on a set of predictions
     def get_summary_stats(self, predictions_df):
@@ -1180,19 +1187,36 @@ class Ensemble(object):
 
         predictions_df = self.get_all_predictions(df)
 
-        summarized_predictions = []
-        for idx, row in predictions_df.iterrows():
+        # If this is just a single dictionary we're getting predictions from:
+        if isinstance(df, dict):
+            # predictions_df is just a dictionary where all the values are the predicted values from one of our subpredictors. we'll want that as a list
+            print(predictions_df)
+            predicted_vals = predictions_df.values()
+            print(predicted_vals)
             if self.method == 'median':
-                summarized_predictions.append(np.median(row))
+                return np.median(predicted_vals)
             elif self.method == 'average' or self.method == 'mean':
-                summarized_predictions.append(np.average(row))
+                return np.average(predicted_vals)
             elif self.method == 'max':
-                summarized_predictions.append(np.max(row))
+                return np.max(predicted_vals)
             elif self.method == 'min':
-                summarized_predictions.append(np.min(row))
+                return np.min(predicted_vals)
+
+        else:
+
+            summarized_predictions = []
+            for idx, row in predictions_df.iterrows():
+                if self.method == 'median':
+                    summarized_predictions.append(np.median(row))
+                elif self.method == 'average' or self.method == 'mean':
+                    summarized_predictions.append(np.average(row))
+                elif self.method == 'max':
+                    summarized_predictions.append(np.max(row))
+                elif self.method == 'min':
+                    summarized_predictions.append(np.min(row))
 
 
-        return summarized_predictions
+            return summarized_predictions
 
     # ################################
     # Public API to get a propbability predictions from each row, where each row will have a list of values, representing the probability of that class
@@ -1201,29 +1225,54 @@ class Ensemble(object):
 
         predictions_df = self.get_all_predictions(df)
 
-        summarized_predictions = []
+        if isinstance(df, dict):
+            print('inside predict_proba where we think we are')
+            # predictions_df is just a dictionary where all the values are the predicted values from one of our subpredictors. we'll want that as a list
+            print(predictions_df)
+            predicted_vals = predictions_df.values()
+            # for pred in predicted_vals:
+                # print(pred)
+                # print(type(pred))
+                # print(pred[0])
+                # print(type(pred[0]))
+                # print(pred[0][0])
+                # print(type(pred[0][0]))
+            predicted_vals = [pred[0][0] for pred in predicted_vals]
+            print(predicted_vals)
+            if self.method == 'median':
+                return np.median(predicted_vals)
+            elif self.method == 'average' or self.method == 'mean':
+                return np.average(predicted_vals)
+            elif self.method == 'max':
+                return np.max(predicted_vals)
+            elif self.method == 'min':
+                return np.min(predicted_vals)
 
-        # Building in support for multi-class problems
-        # Each row represents a single row that we want to get a prediction for
-        # Each row is a list, with predicted probabilities from as many sub-estimators as we have trained
-        # Each item in those subestimator lists represents the predicted probability of that class
-        for row_idx, row in predictions_df.iterrows():
-            row_ensembled_probabilities = []
+        else:
 
-            num_classes = len(row[0])
-            for class_prediction_idx in range(num_classes):
-                class_preds = [estimator_prediction[class_prediction_idx] for estimator_prediction in row]
+            summarized_predictions = []
 
-                if self.method == 'median':
-                    row_ensembled_probabilities.append(np.median(class_preds))
-                elif self.method == 'average' or self.method == 'mean':
-                    row_ensembled_probabilities.append(np.average(class_preds))
-                elif self.method == 'max':
-                    row_ensembled_probabilities.append(np.max(class_preds))
-                elif self.method == 'min':
-                    row_ensembled_probabilities.append(np.min(class_preds))
-            summarized_predictions.append(row_ensembled_probabilities)
-        return summarized_predictions
+            # Building in support for multi-class problems
+            # Each row represents a single row that we want to get a prediction for
+            # Each row is a list, with predicted probabilities from as many sub-estimators as we have trained
+            # Each item in those subestimator lists represents the predicted probability of that class
+            for row_idx, row in predictions_df.iterrows():
+                row_ensembled_probabilities = []
+
+                num_classes = len(row[0])
+                for class_prediction_idx in range(num_classes):
+                    class_preds = [estimator_prediction[class_prediction_idx] for estimator_prediction in row]
+
+                    if self.method == 'median':
+                        row_ensembled_probabilities.append(np.median(class_preds))
+                    elif self.method == 'average' or self.method == 'mean':
+                        row_ensembled_probabilities.append(np.average(class_preds))
+                    elif self.method == 'max':
+                        row_ensembled_probabilities.append(np.max(class_preds))
+                    elif self.method == 'min':
+                        row_ensembled_probabilities.append(np.min(class_preds))
+                summarized_predictions.append(row_ensembled_probabilities)
+            return summarized_predictions
 
 
 
