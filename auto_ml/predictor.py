@@ -65,7 +65,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 class Predictor(object):
 
 
-    def __init__(self, type_of_estimator, column_descriptions, verbose=True):
+    def __init__(self, type_of_estimator, column_descriptions, verbose=True, name=None):
         if type_of_estimator.lower() in ['regressor','regression', 'regressions', 'regressors', 'number', 'numeric', 'continuous']:
             self.type_of_estimator = 'regressor'
         elif type_of_estimator.lower() in ['classifier', 'classification', 'categorizer', 'categorization', 'categories', 'labels', 'labeled', 'label']:
@@ -85,6 +85,10 @@ class Predictor(object):
         self._validate_input_col_descriptions()
 
         self.grid_search_pipelines = []
+
+        self.is_ensemble = False
+        # Set this here for later use if this is an ensembled subpredictor
+        self.name = name
 
 
     def _validate_input_col_descriptions(self):
@@ -124,11 +128,17 @@ class Predictor(object):
 
         pipeline_list = []
 
+        if self.ensembler is not None:
+            if trained_pipeline is not None:
+                pipeline_list.append(('add_ensemble_predictions', trained_pipeline.named_steps['add_ensemble_predictions']))
+            else:
+                pipeline_list.append(('add_ensemble_predictions', utils.AddEnsembledPredictions(ensembler=self.ensembler, type_of_estimator=self.type_of_estimator)))
+
         if self.user_input_func is not None:
             if trained_pipeline is not None:
                 pipeline_list.append(('user_func', trained_pipeline.named_steps['user_func']))
             else:
-                pipeline_list.append(('user_func', FunctionTransformer(func=self.user_input_func, pass_y=False, validate=False) ))
+                pipeline_list.append(('user_func', FunctionTransformer(func=self.user_input_func, pass_y=False, validate=False)))
 
         # These parts will be included no matter what.
         if trained_pipeline is not None:
@@ -301,7 +311,12 @@ class Predictor(object):
         # It also significantly reduces the size of dv.vocabulary_ which can get quite large
 
         dv = trained_pipeline.named_steps['dv']
-        feature_selection = trained_pipeline.named_steps['feature_selection']
+
+        # If we do not have feature selection in the pipeline, just return the pipeline as is
+        try:
+            feature_selection = trained_pipeline.named_steps['feature_selection']
+        except KeyError:
+            return trained_pipeline
         feature_selection_mask = feature_selection.support_mask
         dv.restrict(feature_selection_mask)
 
@@ -312,7 +327,152 @@ class Predictor(object):
         return trained_pipeline_without_feature_selection
 
 
-    def train(self, raw_training_data, user_input_func=None, optimize_entire_pipeline=False, optimize_final_model=None, write_gs_param_results_to_file=True, perform_feature_selection=True, verbose=True, X_test=None, y_test=None, print_training_summary_to_viewer=True, ml_for_analytics=True, only_analytics=False, compute_power=3, take_log_of_y=None, model_names=None, perform_feature_scaling=True):
+    def train_ensemble(self, data, ensemble_training_list, X_test=None, y_test=None, ensemble_method='median', data_for_final_ensembling=None, find_best_method=False):
+
+        if y_test != None:
+            y_test = list(y_test)
+        self.ensemble_predictors = []
+
+        self.is_ensemble = True
+        self.ml_for_analytics = True
+
+        if self.type_of_estimator == 'classifier':
+            scoring = utils.brier_score_loss_wrapper
+            self._scorer = scoring
+        else:
+            scoring = utils.rmse_scoring
+            self._scorer = scoring
+
+        # ################################
+        # If we're using machine learning to assemble our final ensemble, and we don't have data for it from the user, split out data here
+        # ################################
+        if ensemble_method in ['machine learning', 'ml', 'machine_learning'] and data_for_final_ensembling is None:
+
+
+
+            # Just grab the last 20% of the dataset in the order it was given to us
+            ensemble_idx = int(0.7 * len(data))
+            data_for_final_ensembling = data[ensemble_idx:]
+            data = data[:ensemble_idx]
+
+
+
+        # ################################
+        # Train one subpredictor, with logging, and only a subset of the data as chosen by the user
+        # ################################
+        def train_one_ensemble_subpredictor(training_params):
+
+            print('\n\n************************')
+            print('Training a new subpredictor for the ensemble!')
+            name = training_params.pop('name')
+            print('The name you gave for this ensemble is:')
+            print(name)
+            print('\n\n')
+            type_of_estimator = training_params.pop('type_of_estimator')
+            col_descs = training_params.pop('column_descriptions')
+            ml_predictor = Predictor(type_of_estimator, col_descs, name=name)
+
+            this_rounds_data = data
+
+            data_selection_func = training_params.pop('data_selection_func', None)
+            if callable(data_selection_func):
+                try:
+                    # TODO: figure out how to see if this function is expecting to take in the name argument or not
+                    this_rounds_data = data_selection_func(data, name)
+                except TypeError:
+                    this_rounds_data = data_selection_func(data)
+            else:
+                this_rounds_data = data
+
+
+            training_params['raw_training_data'] = this_rounds_data
+
+            ml_predictor.train(**training_params)
+
+            return ml_predictor
+
+            # self.ensemble_predictors.append(ml_predictor)
+
+
+        # ################################
+        # Train subpredictors in parallel
+        # ################################
+        pool = pathos.multiprocessing.ProcessPool()
+
+        # Since we may have already closed the pool, try to restart it
+        try:
+            pool.restart()
+        except AssertionError as e:
+            pass
+        self.ensemble_predictors = pool.map(train_one_ensemble_subpredictor, ensemble_training_list, chunksize=100)
+        self.ensemble_predictors = list(self.ensemble_predictors)
+        # Once we have gotten all we need from the pool, close it so it's not taking up unnecessary memory
+        pool.close()
+        pool.join()
+
+        # ################################
+        # Print scoring information for each trained subpredictor
+        # ################################
+        if X_test is not None:
+            print('Scoring each of the trained subpredictors on the holdout data')
+
+            def score_predictor(predictor, X_test, y_test):
+                print(predictor.name)
+                predictor.score(X_test, y_test)
+
+            pool = pathos.multiprocessing.ProcessPool()
+
+            # Since we may have already closed the pool, try to restart it
+            try:
+                pool.restart()
+            except AssertionError as e:
+                pass
+            pool.map(lambda predictor: score_predictor(predictor, X_test, y_test), self.ensemble_predictors, chunksize=100)
+            # Once we have gotten all we need from the pool, close it so it's not taking up unnecessary memory
+            pool.close()
+            pool.join()
+
+
+        # ################################
+        # Ensemble together our trained subpredictors, either using simple averaging, or training a new machine learning model to pick from amongst them
+        # ################################
+
+        if ensemble_method in ['machine learning', 'ml', 'machine_learning']:
+            ensembler = utils.Ensemble(ensemble_predictors=self.ensemble_predictors, type_of_estimator=self.type_of_estimator, method=ensemble_method)
+
+
+            ml_predictor = Predictor(type_of_estimator=self.type_of_estimator, column_descriptions=self.column_descriptions, name=self.name)
+
+            print('Using machine learning to ensemble together a bunch of trained estimators!')
+            data_for_final_ensembling = data_for_final_ensembling.reset_index()
+            if self.type_of_estimator == 'regressor':
+                model_names = ['RandomForestRegressor', 'LinearRegression', 'ExtraTreesRegressor', 'Ridge', 'GradientBoostingRegressor', 'AdaBoostRegressor', 'Lasso', 'ElasticNet', 'LassoLars', 'OrthogonalMatchingPursuit', 'BayesianRidge', 'SGDRegressor']
+            else:
+                model_names = ['RandomForestClassifier', 'GradientBoostingClassifier', 'RidgeClassifier', 'LogisticRegression']
+                # model_names = ['LogisticRegression']
+            ml_predictor.train(raw_training_data=data_for_final_ensembling, ensembler=ensembler, perform_feature_selection=False, model_names=model_names)
+
+
+            # predictions_on_ensemble_data = ensembler._get_all_predictions(data_for_final_ensembling)
+            # data_for_final_ensembling = pd.concat([data_for_final_ensembling, predictions_on_ensemble_data], axis=1)
+
+            self.trained_pipeline = ml_predictor
+
+            if find_best_method == True:
+                ensembler.find_best_ensemble_method(df=X_test, actuals=y_test)
+
+        else:
+
+            # Create an instance of an Ensemble object that will get predictions from all the trained subpredictors
+            self.trained_pipeline = utils.Ensemble(ensemble_predictors=self.ensemble_predictors, type_of_estimator=self.type_of_estimator, method=ensemble_method)
+
+            if find_best_method == True:
+                self.trained_pipeline.find_best_ensemble_method(df=X_test, actuals=y_test)
+
+
+
+
+    def train(self, raw_training_data, user_input_func=None, optimize_entire_pipeline=False, optimize_final_model=None, write_gs_param_results_to_file=True, perform_feature_selection=True, verbose=True, X_test=None, y_test=None, print_training_summary_to_viewer=True, ml_for_analytics=True, only_analytics=False, compute_power=3, take_log_of_y=None, model_names=None, perform_feature_scaling=True, ensembler=None):
 
         self.user_input_func = user_input_func
         self.optimize_final_model = optimize_final_model
@@ -329,6 +489,8 @@ class Predictor(object):
             self.take_log_of_y = take_log_of_y
         self.model_names = model_names
         self.perform_feature_scaling = perform_feature_scaling
+        self.ensembler = ensembler
+
 
         if verbose:
             print('Welcome to auto_ml! We\'re about to go through and make sense of your data using machine learning')
@@ -567,6 +729,8 @@ class Predictor(object):
 
     def _print_ml_analytics_results_random_forest(self):
         print('\n\nHere are the results from our ' + self.trained_pipeline.named_steps['final_model'].model_name)
+        if self.name != None:
+            print(self.name)
         print('predicting ' + self.output_column)
 
         # XGB's Classifier has a proper .feature_importances_ property, while the XGBRegressor does not.
@@ -667,21 +831,23 @@ class Predictor(object):
         return self.trained_pipeline.predict_proba(prediction_data)
 
 
-    def score(self, X_test, y_test, advanced_scoring=True):
+    def score(self, X_test, y_test, advanced_scoring=True, verbose=2):
+
         if isinstance(X_test, list):
             X_test = pd.DataFrame(X_test)
         y_test = list(y_test)
 
         if self._scorer is not None:
             if self.type_of_estimator == 'regressor':
-                return self._scorer(self.trained_pipeline, X_test, y_test, self.took_log_of_y, advanced_scoring=advanced_scoring)
+                return self._scorer(self.trained_pipeline, X_test, y_test, self.took_log_of_y, advanced_scoring=advanced_scoring, verbose=verbose, name=self.name)
+
             elif self.type_of_estimator == 'classifier':
                 if self._scorer == accuracy_score:
                     predictions = self.trained_pipeline.predict(X_test)
                     return self._scorer(y_test, predictions)
                 elif advanced_scoring:
                     score, probas = self._scorer(self.trained_pipeline, X_test, y_test, advanced_scoring=advanced_scoring)
-                    utils.advanced_scoring_classifiers(probas, y_test)
+                    utils.advanced_scoring_classifiers(probas, y_test, name=self.name)
                     return score
                 else:
                     return self._scorer(self.trained_pipeline, X_test, y_test, advanced_scoring=advanced_scoring)
@@ -758,12 +924,12 @@ class Predictor(object):
 
             print('\n\nWhen passing in new data to get predictions on, columns that were not present (or were not found to be useful) in the training data will be silently ignored.')
             print('It is worthwhile to make sure that you feed in all the most useful data points though, to make sure you can get the highest quality predictions.')
-            print('\nThese are the most important features that were fed into the model:')
+            # print('\nThese are the most important features that were fed into the model:')
 
-            if self.ml_for_analytics and self.trained_pipeline.named_steps['final_model'].model_name in ('LogisticRegression', 'RidgeClassifier', 'LinearRegression', 'Ridge'):
-                self._print_ml_analytics_results_regression()
-            elif self.ml_for_analytics and self.trained_pipeline.named_steps['final_model'].model_name in ['RandomForestClassifier', 'RandomForestRegressor', 'XGBClassifier', 'XGBRegressor']:
-                self._print_ml_analytics_results_random_forest()
+            # if self.ml_for_analytics and self.trained_pipeline.named_steps['final_model'].model_name in ('LogisticRegression', 'RidgeClassifier', 'LinearRegression', 'Ridge'):
+            #     self._print_ml_analytics_results_regression()
+            # elif self.ml_for_analytics and self.trained_pipeline.named_steps['final_model'].model_name in ['RandomForestClassifier', 'RandomForestRegressor', 'XGBClassifier', 'XGBRegressor']:
+            #     self._print_ml_analytics_results_random_forest()
 
         return os.getcwd() + file_name
 

@@ -14,7 +14,7 @@ import random
 
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.cluster import MiniBatchKMeans
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, ExtraTreesRegressor, AdaBoostRegressor, GradientBoostingRegressor, GradientBoostingClassifier
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, ExtraTreesRegressor, AdaBoostRegressor, GradientBoostingRegressor, GradientBoostingClassifier, ExtraTreesClassifier, AdaBoostClassifier
 from sklearn.feature_selection import GenericUnivariateSelect, RFECV, SelectFromModel
 from sklearn.grid_search import GridSearchCV, RandomizedSearchCV
 from sklearn.linear_model import RandomizedLasso, RandomizedLogisticRegression, RANSACRegressor, LinearRegression, Ridge, Lasso, ElasticNet, LassoLars, OrthogonalMatchingPursuit, BayesianRidge, ARDRegression, SGDRegressor, PassiveAggressiveRegressor, LogisticRegression, RidgeClassifier, SGDClassifier, Perceptron, PassiveAggressiveClassifier
@@ -471,28 +471,6 @@ def add_date_features_dict(row, date_col):
 #     return model
 
 
-def add_date_features_dict(row, date_col):
-
-    # Make a copy of all the engineered features from the date, without modifying the original object at all
-    # This way the same original object can be passed into a number of different trained auto_ml predictors
-    date_feature_dict = {}
-    date_val = row[date_col]
-
-    if not isinstance(date_val, (datetime.datetime, datetime.date)):
-        date_val = dateutil.parser.parse(date_val)
-
-    date_feature_dict[date_col + '_day_of_week'] = date_val.weekday()
-    date_feature_dict[date_col + '_hour'] = date_val.hour
-
-    date_feature_dict[date_col + '_minutes_into_day'] = date_val.hour * 60 + date_val.minute
-
-    date_feature_dict[date_col + '_is_weekend'] = date_val.weekday() in (5,6)
-
-    # del row[date_col]
-
-    return date_feature_dict
-
-
 def get_model_from_name(model_name):
     model_map = {
         # Classifiers
@@ -500,6 +478,9 @@ def get_model_from_name(model_name):
         'RandomForestClassifier': RandomForestClassifier(n_jobs=-2),
         'RidgeClassifier': RidgeClassifier(),
         'GradientBoostingClassifier': GradientBoostingClassifier(),
+        'ExtraTreesClassifier': ExtraTreesClassifier(n_jobs=-1),
+        'AdaBoostClassifier': AdaBoostClassifier(n_estimators=10),
+
 
         'SGDClassifier': SGDClassifier(n_jobs=-1),
         'Perceptron': Perceptron(n_jobs=-1),
@@ -511,7 +492,7 @@ def get_model_from_name(model_name):
         'RandomForestRegressor': RandomForestRegressor(n_jobs=-2),
         'Ridge': Ridge(),
         'ExtraTreesRegressor': ExtraTreesRegressor(n_jobs=-1),
-        'AdaBoostRegressor': AdaBoostRegressor(n_estimators=5),
+        'AdaBoostRegressor': AdaBoostRegressor(n_estimators=10),
         'RANSACRegressor': RANSACRegressor(),
         'GradientBoostingRegressor': GradientBoostingRegressor(presort=False),
 
@@ -548,12 +529,10 @@ def get_model_from_name(model_name):
 class FinalModelATC(BaseEstimator, TransformerMixin):
 
 
-    def __init__(self, model, model_name, X_train=None, y_train=None, ml_for_analytics=False, type_of_estimator='classifier', output_column=None):
+    def __init__(self, model, model_name, ml_for_analytics=False, type_of_estimator='classifier', output_column=None):
 
         self.model = model
         self.model_name = model_name
-        # self.X_train = X_train
-        # self.y_train = y_train
         self.ml_for_analytics = ml_for_analytics
         self.type_of_estimator = type_of_estimator
 
@@ -575,9 +554,9 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
             X_fit = X
 
 
-        # if self.model_name[:12] == 'DeepLearning':
-        #     if scipy.sparse.issparse(X_fit):
-        #         X_fit = X_fit.todense()
+        if self.model_name[:12] == 'DeepLearning' or self.model_name in ['BayesianRidge', 'LassoLars', 'OrthogonalMatchingPursuit', 'ARDRegression']:
+            if scipy.sparse.issparse(X_fit):
+                X_fit = X_fit.todense()
 
         #     num_cols = X_fit.shape[1]
         #     kwargs = {
@@ -601,7 +580,7 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
 
     def score(self, X, y):
         # At the time of writing this, GradientBoosting does not support sparse matrices for predictions
-        if self.model_name[:16] == 'GradientBoosting' and scipy.sparse.issparse(X):
+        if (self.model_name[:16] == 'GradientBoosting' or self.model_name in ['BayesianRidge', 'LassoLars', 'OrthogonalMatchingPursuit', 'ARDRegression']) and scipy.sparse.issparse(X):
             X = X.todense()
 
         if self._scorer is not None:
@@ -622,7 +601,7 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
             # Trying to force XGBoost to play nice with sparse matrices
             X = scipy.sparse.hstack((X, ones))
 
-        if self.model_name[:16] == 'GradientBoosting' and scipy.sparse.issparse(X):
+        if (self.model_name[:16] == 'GradientBoosting' or self.model_name in ['BayesianRidge', 'LassoLars', 'OrthogonalMatchingPursuit', 'ARDRegression']) and scipy.sparse.issparse(X):
             X = X.todense()
 
         try:
@@ -646,7 +625,7 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
             # Trying to force XGBoost to play nice with sparse matrices
             X_predict = scipy.sparse.hstack((X, ones))
 
-        elif (self.model_name[:16] == 'GradientBoosting' or self.model_name[:12] == 'DeepLearning') and scipy.sparse.issparse(X):
+        elif (self.model_name[:16] == 'GradientBoosting' or self.model_name[:12] == 'DeepLearning' or self.model_name in ['BayesianRidge', 'LassoLars', 'OrthogonalMatchingPursuit', 'ARDRegression']) and scipy.sparse.issparse(X):
             X_predict = X.todense()
 
         else:
@@ -661,10 +640,12 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
             return prediction
 
 
-def advanced_scoring_classifiers(probas, actuals):
+def advanced_scoring_classifiers(probas, actuals, name=None):
 
     print('Here is our brier-score-loss, which is the value we optimized for while training, and is the value returned from .score()')
     print('It is a measure of how close the PROBABILITY predictions are.')
+    if name != None:
+        print(name)
     print(brier_score_loss(actuals, probas))
 
     print('\nHere is the trained estimator\'s overall accuracy (when it predicts a label, how frequently is that the correct label?)')
@@ -699,7 +680,7 @@ def advanced_scoring_classifiers(probas, actuals):
 
     print('\n\n')
 
-def calculate_and_print_differences(predictions, actuals):
+def calculate_and_print_differences(predictions, actuals, name=None):
     pos_differences = []
     neg_differences = []
     # Technically, we're ignoring cases where we are spot on
@@ -709,24 +690,26 @@ def calculate_and_print_differences(predictions, actuals):
             pos_differences.append(difference)
         elif difference < 0:
             neg_differences.append(difference)
+
+    if name != None:
+        print(name)
     print('Count of positive differences (prediction > actual):')
     print(len(pos_differences))
     print('Count of negative differences:')
     print(len(neg_differences))
-    print('Average positive difference:')
-    print(sum(pos_differences) * 1.0 / len(pos_differences))
-    print('Average negative difference:')
-    print(sum(neg_differences) * 1.0 / len(neg_differences))
-    print('count predictions > 10 min off')
-    ten_min_off = [x for x in neg_differences if x < -10 * 60]
-    print(len(ten_min_off))
-    print('average amount off by for these cases')
-    print(sum(ten_min_off) * 1.0 / len(ten_min_off))
+    if len(pos_differences) > 0:
+        print('Average positive difference:')
+        print(sum(pos_differences) * 1.0 / len(pos_differences))
+    if len(neg_differences) > 0:
+        print('Average negative difference:')
+        print(sum(neg_differences) * 1.0 / len(neg_differences))
 
 
-def advanced_scoring_regressors(predictions, actuals):
+def advanced_scoring_regressors(predictions, actuals, verbose=2, name=None):
 
     print('\n\n***********************************************')
+    if name != None:
+        print(name)
     print('Advanced scoring metrics for the trained regression model on this particular dataset:\n')
 
     # 1. overall RMSE
@@ -755,33 +738,34 @@ def advanced_scoring_regressors(predictions, actuals):
     print(r2_score(actuals, predictions))
 
     # 5. pos and neg differences
-    calculate_and_print_differences(predictions, actuals)
+    calculate_and_print_differences(predictions, actuals, name=name)
     # 6.
 
-    actuals_preds = zip(actuals, predictions)
+    actuals_preds = list(zip(actuals, predictions))
     # Sort by PREDICTED value, since this is what what we will know at the time we make a prediction
     actuals_preds.sort(key=lambda pair: pair[1])
     actuals_sorted = [act for act, pred in actuals_preds]
     predictions_sorted = [pred for act, pred in actuals_preds]
 
-    print('Here\'s how the trained predictor did on each successive decile (ten percent chunk) of the predictions:')
-    for i in range(1,10):
-        print('\n**************')
-        print('Bucket number:')
-        print(i)
-        # There's probably some fenceposting error here
-        min_idx = int((i - 1) / 10.0 * len(actuals_sorted))
-        max_idx = int(i / 10.0 * len(actuals_sorted))
-        actuals_for_this_decile = actuals_sorted[min_idx:max_idx]
-        predictions_for_this_decile = predictions_sorted[min_idx:max_idx]
+    if verbose > 2:
+        print('Here\'s how the trained predictor did on each successive decile (ten percent chunk) of the predictions:')
+        for i in range(1,10):
+            print('\n**************')
+            print('Bucket number:')
+            print(i)
+            # There's probably some fenceposting error here
+            min_idx = int((i - 1) / 10.0 * len(actuals_sorted))
+            max_idx = int(i / 10.0 * len(actuals_sorted))
+            actuals_for_this_decile = actuals_sorted[min_idx:max_idx]
+            predictions_for_this_decile = predictions_sorted[min_idx:max_idx]
 
-        print('Avg predicted val in this bucket')
-        print(sum(predictions_for_this_decile) * 1.0 / len(predictions_for_this_decile))
-        print('Avg actual val in this bucket')
-        print(sum(actuals_for_this_decile) * 1.0 / len(actuals_for_this_decile))
-        print('RMSE for this bucket')
-        print(mean_squared_error(actuals_for_this_decile, predictions_for_this_decile)**0.5)
-        calculate_and_print_differences(predictions_for_this_decile, actuals_for_this_decile)
+            print('Avg predicted val in this bucket')
+            print(sum(predictions_for_this_decile) * 1.0 / len(predictions_for_this_decile))
+            print('Avg actual val in this bucket')
+            print(sum(actuals_for_this_decile) * 1.0 / len(actuals_for_this_decile))
+            print('RMSE for this bucket')
+            print(mean_squared_error(actuals_for_this_decile, predictions_for_this_decile)**0.5)
+            calculate_and_print_differences(predictions_for_this_decile, actuals_for_this_decile)
 
     print('')
     print('\n***********************************************\n\n')
@@ -921,17 +905,23 @@ class FeatureSelectionTransformer(BaseEstimator, TransformerMixin):
             return pruned_X
 
 
-def rmse_scoring(estimator, X, y, took_log_of_y=False, advanced_scoring=False):
+def rmse_scoring(estimator, X, y, took_log_of_y=False, advanced_scoring=False, verbose=2, name=None, scoring='rmse'):
     if isinstance(estimator, GradientBoostingRegressor):
         X = X.toarray()
     predictions = estimator.predict(X)
     if took_log_of_y:
         for idx, val in enumerate(predictions):
             predictions[idx] = math.exp(val)
-    rmse = mean_squared_error(y, predictions)**0.5
+
+    if scoring == 'rmse':
+        score = mean_squared_error(y, predictions)**0.5
+    elif scoring == 'median_absolute_error':
+        score = median_absolute_error(y, predictions)
     if advanced_scoring == True:
-        advanced_scoring_regressors(predictions, y)
-    return - 1 * rmse
+        if hasattr(estimator, 'name'):
+            print(estimator.name)
+        advanced_scoring_regressors(predictions, y, verbose=verbose, name=name)
+    return - 1 * score
 
 
 def brier_score_loss_wrapper(estimator, X, y, advanced_scoring=False):
@@ -1079,3 +1069,220 @@ def safely_drop_columns(df, cols_to_drop):
 
     df = df.drop(safe_cols_to_drop, axis=1)
     return df
+
+
+class Ensemble(object):
+
+    def __init__(self, ensemble_predictors, type_of_estimator, method='average'):
+        self.ensemble_predictors = ensemble_predictors
+        self.type_of_estimator = type_of_estimator
+        self.method = method
+
+
+    # ################################
+    # Get a dataframe that is all the predictions from all the sub-models
+    # ################################
+    # Note that we will get these predictions in parallel (relatively quick)
+
+    def get_all_predictions(self, df):
+
+        def get_predictions_for_one_estimator(estimator, df):
+            estimator_name = estimator.name
+
+            if self.type_of_estimator == 'regressor':
+                predictions = estimator.predict(df)
+            else:
+                # For classifiers
+                predictions = list(estimator.predict_proba(df))
+
+            return {estimator_name: predictions}
+
+
+        # Open a new multiprocessing pool
+        pool = pathos.multiprocessing.ProcessPool()
+
+        # Since we may have already closed the pool, try to restart it
+        try:
+            pool.restart()
+        except AssertionError as e:
+            pass
+
+        # Pathos doesn't like datasets beyond a certain size. So fall back on single, non-parallel predictions instead.
+        try:
+            predictions_from_all_estimators = pool.map(lambda predictor: get_predictions_for_one_estimator(predictor, df), self.ensemble_predictors, chunksize=100)
+            predictions_from_all_estimators = list(predictions_from_all_estimators)
+        except:
+            predictions_from_all_estimators = map(lambda predictor: get_predictions_for_one_estimator(predictor, df), self.ensemble_predictors)
+            predictions_from_all_estimators = list(predictions_from_all_estimators)
+
+
+        # Once we have gotten all we need from the pool, close it so it's not taking up unnecessary memory
+        pool.close()
+        pool.join()
+
+
+        results = {}
+        for result_dict in predictions_from_all_estimators:
+            results.update(result_dict)
+
+        predictions_df = pd.DataFrame.from_dict(results, orient='columns')
+
+        return predictions_df
+
+    # Gets summary stats on a set of predictions
+    def get_summary_stats(self, predictions_df):
+        summarized_predictions = []
+
+        # Building in support for multi-class problems
+        # Each row represents a single row that we want to get a prediction for
+        # Each row is a list, with predicted probabilities from as many sub-estimators as we have trained
+        # Each item in those subestimator lists represents the predicted probability of that class
+        for row_idx, row in predictions_df.iterrows():
+            row_results = {}
+
+            if self.type_of_estimator == 'classifier':
+                num_classes = len(row[0])
+                for class_prediction_idx in range(num_classes):
+                    class_preds = [estimator_prediction[class_prediction_idx] for estimator_prediction in row]
+
+                    class_summarized_predictions = self.get_summary_stats_from_row(class_preds, prefix='subpredictor_class=' + str(class_prediction_idx))
+                    row_results.update(class_summarized_predictions)
+            else:
+                row_summarized = self.get_summary_stats_from_row(row, prefix='subpredictors_')
+                row_results.update(row_summarized)
+
+            summarized_predictions.append(row_results)
+
+        results_df = pd.DataFrame(summarized_predictions)
+        return results_df
+
+
+    def get_summary_stats_from_row(self, row, prefix=''):
+        results = {}
+
+        results[prefix + '_median'] = np.median(row)
+        results[prefix + '_average'] = np.average(row)
+        results[prefix + '_max'] = np.max(row)
+        results[prefix + '_min'] = np.min(row)
+        results[prefix + '_range'] = results[prefix + '_max'] - results[prefix + '_min']
+
+        return results
+
+
+
+
+
+    # ################################
+    # Public API to get a single prediction from each row, where that single prediction is somehow an ensemble of all our trained subpredictors
+    # ################################
+
+    def predict(self, df):
+
+        predictions_df = self.get_all_predictions(df)
+
+        summarized_predictions = []
+        for idx, row in predictions_df.iterrows():
+            if self.method == 'median':
+                summarized_predictions.append(np.median(row))
+            elif self.method == 'average' or self.method == 'mean':
+                summarized_predictions.append(np.average(row))
+            elif self.method == 'max':
+                summarized_predictions.append(np.max(row))
+            elif self.method == 'min':
+                summarized_predictions.append(np.min(row))
+
+
+        return summarized_predictions
+
+    # ################################
+    # Public API to get a propbability predictions from each row, where each row will have a list of values, representing the probability of that class
+    # ################################
+    def predict_proba(self, df):
+
+        predictions_df = self.get_all_predictions(df)
+
+        summarized_predictions = []
+
+        # Building in support for multi-class problems
+        # Each row represents a single row that we want to get a prediction for
+        # Each row is a list, with predicted probabilities from as many sub-estimators as we have trained
+        # Each item in those subestimator lists represents the predicted probability of that class
+        for row_idx, row in predictions_df.iterrows():
+            row_ensembled_probabilities = []
+
+            num_classes = len(row[0])
+            for class_prediction_idx in range(num_classes):
+                class_preds = [estimator_prediction[class_prediction_idx] for estimator_prediction in row]
+
+                if self.method == 'median':
+                    row_ensembled_probabilities.append(np.median(class_preds))
+                elif self.method == 'average' or self.method == 'mean':
+                    row_ensembled_probabilities.append(np.average(class_preds))
+                elif self.method == 'max':
+                    row_ensembled_probabilities.append(np.max(class_preds))
+                elif self.method == 'min':
+                    row_ensembled_probabilities.append(np.min(class_preds))
+            summarized_predictions.append(row_ensembled_probabilities)
+        return summarized_predictions
+
+
+
+    # ################################
+    # Find the best enemble method that is not ml
+    # ################################
+    def find_best_ensemble_method(self, df, actuals):
+        predictions_df = self.get_all_predictions(df)
+
+        summary_df = self.get_summary_stats(predictions_df)
+
+        for method in ['min', 'max', 'average', 'median']:
+            print(method)
+            for col in summary_df.columns:
+                if method in col:
+                    if self.type_of_estimator == 'regressor':
+                        advanced_scoring_regressors(summary_df[col], actuals, name=method)
+                    else:
+                        advanced_scoring_classifiers(summary_df[col], actuals)
+
+
+
+
+class AddEnsembledPredictions(BaseEstimator, TransformerMixin):
+
+    def __init__(self, ensembler, type_of_estimator):
+        self.ensembler = ensembler
+        self.type_of_estimator = type_of_estimator
+
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X, y=None):
+        predictions = self.ensembler.get_all_predictions(X)
+
+        summarized_predictions = self.ensembler.get_summary_stats(predictions)
+
+        # If this is a classifier, the predictions from each estimator will be an array of predicted probabilities.
+        # We will need to unpack that list
+        if self.type_of_estimator == 'classifier':
+            flattened_predictions_dfs = []
+            for col in predictions:
+                flattened_df = pd.DataFrame(predictions[col].tolist())
+                col_names = []
+                for col_num in flattened_df:
+                    col_names.append('subpredictor_' + str(col) + '_class=' + str(col_num))
+
+                flattened_df.columns = col_names
+
+                # Drop the first column in the DataFrame, since it just contains the inverse data from the other column(s)
+                flattened_df = flattened_df.drop(flattened_df.columns[0], axis=1)
+
+                flattened_predictions_dfs.append(flattened_df)
+
+            predictions = pd.concat(flattened_predictions_dfs, axis=1)
+
+        X = X.reset_index(drop=True)
+        # X = pd.concat([X, predictions, summarized_predictions], axis=1)
+        X = pd.concat([predictions, summarized_predictions], axis=1)
+
+        return X
