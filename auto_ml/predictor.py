@@ -10,10 +10,17 @@ import dill
 import pandas as pd
 import pathos
 
-from sklearn.cross_validation import train_test_split
+# Ultimately, we (the authors of auto_ml) are responsible for building a project that's robust against warnings.
+# The classes of warnings below are ones we've deemed acceptable. The user should be able to sit at a high level of abstraction, and not be bothered with the internals of how we're handing these things.
+# Ignore all warnings that are UserWarnings or DeprecationWarnings. We'll fix these ourselves as necessary.
+# warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+pd.options.mode.chained_assignment = None  # default='warn'
+
+# from sklearn.model_selection import
 from sklearn.decomposition import TruncatedSVD
 from sklearn.feature_extraction import DictVectorizer
-from sklearn.grid_search import GridSearchCV
+from sklearn.model_selection import GridSearchCV, train_test_split
 from sklearn.metrics import mean_squared_error, brier_score_loss, make_scorer, accuracy_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer
@@ -21,19 +28,28 @@ from sklearn.preprocessing import FunctionTransformer
 
 # This is ugly, but allows auto_ml to work whether it's installed using pip, or the whole project is installed using git clone https://github.com/ClimbsRocks/auto_ml
 try:
-    from auto_ml import utils
-except:
-    from .. auto_ml import utils
-
-try:
-    from auto_ml import date_feature_engineering
-except:
-    from .. auto_ml import date_feature_engineering
-
-try:
+# from auto_ml import date_feature_engineering
     from auto_ml import DataFrameVectorizer
-except:
+    from auto_ml import utils
+    from auto_ml import utils_data_cleaning
+    from auto_ml import utils_ensemble
+    from auto_ml import utils_feature_selection
+    from auto_ml import utils_model_training
+    from auto_ml import utils_models
+    from auto_ml import utils_scaling
+    from auto_ml import utils_scoring
+except ImportError:
+    from .. auto_ml import date_feature_engineering
     from .. auto_ml import DataFrameVectorizer
+    from .. auto_ml import utils
+    from .. auto_ml import utils_data_cleaning
+    from .. auto_ml import utils_ensemble
+    from .. auto_ml import utils_feature_selection
+    from .. auto_ml import utils_model_training
+    from .. auto_ml import utils_models
+    from .. auto_ml import utils_scaling
+    from .. auto_ml import utils_scoring
+
 
 # XGBoost can be a pain to install. It's also a super powerful and effective package.
 # So we'll make it optional here. If a user wants to install XGBoost themselves, we fully support XGBoost!
@@ -49,12 +65,6 @@ except NameError:
 except ImportError:
     pass
 
-
-# Ultimately, we (the authors of auto_ml) are responsible for building a project that's robust against warnings.
-# The classes of warnings below are ones we've deemed acceptable. The user should be able to sit at a high level of abstraction, and not be bothered with the internals of how we're handing these things.
-# Ignore all warnings that are UserWarnings or DeprecationWarnings. We'll fix these ourselves as necessary.
-warnings.filterwarnings("ignore", category=UserWarning)
-warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 
 class Predictor(object):
@@ -127,7 +137,7 @@ class Predictor(object):
             if trained_pipeline is not None:
                 pipeline_list.append(('add_ensemble_predictions', trained_pipeline.named_steps['add_ensemble_predictions']))
             else:
-                pipeline_list.append(('add_ensemble_predictions', utils.AddEnsembledPredictions(ensembler=self.ensembler, type_of_estimator=self.type_of_estimator)))
+                pipeline_list.append(('add_ensemble_predictions', utils_ensemble.AddEnsembledPredictions(ensembler=self.ensembler, type_of_estimator=self.type_of_estimator)))
 
         if self.user_input_func is not None:
             if trained_pipeline is not None:
@@ -139,13 +149,13 @@ class Predictor(object):
         if trained_pipeline is not None:
             pipeline_list.append(('basic_transform', trained_pipeline.named_steps['basic_transform']))
         else:
-            pipeline_list.append(('basic_transform', utils.BasicDataCleaning(column_descriptions=self.column_descriptions)))
+            pipeline_list.append(('basic_transform', utils_data_cleaning.BasicDataCleaning(column_descriptions=self.column_descriptions)))
 
         if self.perform_feature_scaling is True or (self.compute_power >= 7 and self.perform_feature_scaling is not False):
             if trained_pipeline is not None:
                 pipeline_list.append(('scaler', trained_pipeline.named_steps['scaler']))
             else:
-                pipeline_list.append(('scaler', utils.CustomSparseScaler(self.column_descriptions)))
+                pipeline_list.append(('scaler', utils_scaling.CustomSparseScaler(self.column_descriptions)))
 
 
         if trained_pipeline is not None:
@@ -160,13 +170,13 @@ class Predictor(object):
                 pass
             else:
                 # pipeline_list.append(('pca', TruncatedSVD()))
-                pipeline_list.append(('feature_selection', utils.FeatureSelectionTransformer(type_of_estimator=self.type_of_estimator, column_descriptions=self.column_descriptions, feature_selection_model='SelectFromModel') ))
+                pipeline_list.append(('feature_selection', utils_feature_selection.FeatureSelectionTransformer(type_of_estimator=self.type_of_estimator, column_descriptions=self.column_descriptions, feature_selection_model='SelectFromModel') ))
 
         if trained_pipeline is not None:
             pipeline_list.append(('final_model', trained_pipeline.named_steps['final_model']))
         else:
-            final_model = utils.get_model_from_name(model_name)
-            pipeline_list.append(('final_model', utils.FinalModelATC(model=final_model, model_name=model_name, type_of_estimator=self.type_of_estimator, ml_for_analytics=self.ml_for_analytics, name=self.name)))
+            final_model = utils_models.get_model_from_name(model_name)
+            pipeline_list.append(('final_model', utils_model_training.FinalModelATC(model=final_model, model_name=model_name, type_of_estimator=self.type_of_estimator, ml_for_analytics=self.ml_for_analytics, name=self.name)))
 
 
         constructed_pipeline = Pipeline(pipeline_list)
@@ -274,7 +284,7 @@ class Predictor(object):
             bad_vals = []
             for idx, val in enumerate(y):
                 try:
-                    float_val = utils.clean_val(val)
+                    float_val = utils_data_cleaning.clean_val(val)
                     y_floats.append(float_val)
                 except ValueError as err:
                     indices_to_delete.append(idx)
@@ -329,11 +339,16 @@ class Predictor(object):
         self.ml_for_analytics = True
 
         if self.type_of_estimator == 'classifier':
-            scoring = utils.brier_score_loss_wrapper
+            scoring = utils_scoring.brier_score_loss_wrapper
             self._scorer = scoring
         else:
-            scoring = utils.rmse_scoring
+            scoring = utils_scoring.rmse_scoring
             self._scorer = scoring
+
+        # Make it optional for the person to pass in type_of_estimator
+        for training_params in ensemble_training_list:
+            if training_params.get('type_of_estimator', None) == None:
+                training_params['type_of_estimator'] = self.type_of_estimator
 
         # ################################
         # If we're using machine learning to assemble our final ensemble, and we don't have data for it from the user, split out data here
@@ -437,7 +452,7 @@ class Predictor(object):
         # ################################
 
         if ensemble_method in ['machine learning', 'ml', 'machine_learning']:
-            ensembler = utils.Ensemble(ensemble_predictors=self.ensemble_predictors, type_of_estimator=self.type_of_estimator, method=ensemble_method)
+            ensembler = utils_ensemble.Ensemble(ensemble_predictors=self.ensemble_predictors, type_of_estimator=self.type_of_estimator, method=ensemble_method)
 
 
             ml_predictor = Predictor(type_of_estimator=self.type_of_estimator, column_descriptions=self.column_descriptions, name=self.name)
@@ -463,7 +478,7 @@ class Predictor(object):
         else:
 
             # Create an instance of an Ensemble object that will get predictions from all the trained subpredictors
-            self.trained_pipeline = utils.Ensemble(ensemble_predictors=self.ensemble_predictors, type_of_estimator=self.type_of_estimator, method=ensemble_method)
+            self.trained_pipeline = utils_ensemble.Ensemble(ensemble_predictors=self.ensemble_predictors, type_of_estimator=self.type_of_estimator, method=ensemble_method)
 
             if find_best_method == True:
                 self.trained_pipeline.find_best_ensemble_method(df=X_test, actuals=y_test)
@@ -471,12 +486,11 @@ class Predictor(object):
 
 
 
-    def train(self, raw_training_data, user_input_func=None, optimize_entire_pipeline=False, optimize_final_model=None, write_gs_param_results_to_file=True, perform_feature_selection=True, verbose=True, X_test=None, y_test=None, print_training_summary_to_viewer=True, ml_for_analytics=True, only_analytics=False, compute_power=3, take_log_of_y=None, model_names=None, perform_feature_scaling=True, ensembler=None):
+    def train(self, raw_training_data, user_input_func=None, optimize_entire_pipeline=False, optimize_final_model=None, write_gs_param_results_to_file=True, perform_feature_selection=None, verbose=True, X_test=None, y_test=None, print_training_summary_to_viewer=True, ml_for_analytics=True, only_analytics=False, compute_power=3, take_log_of_y=None, model_names=None, perform_feature_scaling=True, ensembler=None):
 
         self.user_input_func = user_input_func
         self.optimize_final_model = optimize_final_model
         self.optimize_entire_pipeline = optimize_entire_pipeline
-        self.perform_feature_selection = perform_feature_selection
         self.write_gs_param_results_to_file = write_gs_param_results_to_file
         self.compute_power = compute_power
         self.ml_for_analytics = ml_for_analytics
@@ -490,10 +504,8 @@ class Predictor(object):
         self.perform_feature_scaling = perform_feature_scaling
         self.ensembler = ensembler
 
-
         if verbose:
             print('Welcome to auto_ml! We\'re about to go through and make sense of your data using machine learning')
-
 
         # We accept input as either a DataFrame, or as a list of dictionaries. Internally, we use DataFrames. So if the user gave us a list, convert it to a DataFrame here.
         if isinstance(raw_training_data, list):
@@ -502,6 +514,12 @@ class Predictor(object):
         else:
             X_df = raw_training_data
 
+        if len(X_df.columns) < 50 and perform_feature_selection != True:
+            perform_feature_selection = False
+        else:
+            perform_feature_selection = True
+
+        self.perform_feature_selection = perform_feature_selection
 
         # To keep this as light in memory as possible, immediately remove any columns that the user has already told us should be ignored
         if len(self.cols_to_ignore) > 0:
@@ -528,10 +546,10 @@ class Predictor(object):
             if len(set(y)) > 2:
                 scoring = accuracy_score
             else:
-                scoring = utils.brier_score_loss_wrapper
+                scoring = utils_scoring.brier_score_loss_wrapper
             self._scorer = scoring
         else:
-            scoring = utils.rmse_scoring
+            scoring = utils_scoring.rmse_scoring
             self._scorer = scoring
 
         if verbose:
@@ -575,7 +593,7 @@ class Predictor(object):
             self.grid_search_params['final_model__model_name'] = [model_name]
 
             if self.optimize_final_model is True or (self.compute_power >= 5 and self.optimize_final_model is not False):
-                raw_search_params = utils.get_search_params(model_name)
+                raw_search_params = utils_models.get_search_params(model_name)
                 for param_name, param_list in raw_search_params.items():
                     self.grid_search_params['final_model__model__' + param_name] = param_list
 
@@ -652,8 +670,8 @@ class Predictor(object):
             # DictVectorizer will now perform DictVectorizer and FeatureSelection in a very efficient combination of the two steps.
             self.trained_pipeline = self._consolidate_feature_selection_steps(self.trained_pipeline)
 
-            if self.fit_grid_search:
-                self.grid_search_pipelines.append(self.trained_pipeline)
+            # if self.fit_grid_search:
+            #     self.grid_search_pipelines.append(self.trained_pipeline)
 
             if self.ml_for_analytics and model_name in ('LogisticRegression', 'RidgeClassifier', 'LinearRegression', 'Ridge'):
                 self._print_ml_analytics_results_regression()
@@ -846,7 +864,7 @@ class Predictor(object):
                     return self._scorer(y_test, predictions)
                 elif advanced_scoring:
                     score, probas = self._scorer(self.trained_pipeline, X_test, y_test, advanced_scoring=advanced_scoring)
-                    utils.advanced_scoring_classifiers(probas, y_test, name=self.name)
+                    utils_scoring.advanced_scoring_classifiers(probas, y_test, name=self.name)
                     return score
                 else:
                     return self._scorer(self.trained_pipeline, X_test, y_test, advanced_scoring=advanced_scoring)
@@ -854,20 +872,20 @@ class Predictor(object):
             return self.trained_pipeline.score(X_test, y_test)
 
 
-    def save(self, file_name='auto_ml_saved_pipeline.pkl', verbose=True):
+    def save(self, file_name='auto_ml_saved_pipeline.dill', verbose=True):
         with open(file_name, 'wb') as open_file_name:
             dill.dump(self.trained_pipeline, open_file_name)
 
         if verbose:
-            print('\n\nWe have saved the trained pipeline to a filed called "auto_ml_saved_pipeline.pkl"')
+            print('\n\nWe have saved the trained pipeline to a filed called ' + file_name)
             print('It is saved in the directory: ')
             print(os.getcwd())
             print('To use it to get predictions, please follow the following flow (adjusting for your own uses as necessary:\n\n')
-            print('`with open("auto_ml_saved_pipeline.pkl", "rb") as read_file:`')
+            print('`with open(' + file_name + ', "rb") as read_file:`')
             print('`    trained_ml_pipeline = dill.load(read_file)`')
             print('`trained_ml_pipeline.predict(list_of_dicts_with_same_data_as_training_data)`\n\n')
 
-            print('Note that this pickle file can only be loaded in an environment with the same modules installed, and running the same Python version.')
+            print('Note that this pickle/dill file can only be loaded in an environment with the same modules installed, and running the same Python version.')
             print('This version of Python is:')
             print(sys.version_info)
 
@@ -879,5 +897,5 @@ class Predictor(object):
             #     self._print_ml_analytics_results_regression()
             # elif self.ml_for_analytics and self.trained_pipeline.named_steps['final_model'].model_name in ['RandomForestClassifier', 'RandomForestRegressor', 'XGBClassifier', 'XGBRegressor']:
             #     self._print_ml_analytics_results_random_forest()
+        return os.path.join(os.getcwd(), file_name)
 
-        return os.getcwd() + file_name

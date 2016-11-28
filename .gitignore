@@ -19,3 +19,4 @@ xgboost/*
 *.lua
 *.pbz2
 *.pgz
+*.dill
