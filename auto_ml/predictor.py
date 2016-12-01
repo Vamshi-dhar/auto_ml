@@ -164,7 +164,7 @@ class Predictor(object):
             pipeline_list.append(('dv', DataFrameVectorizer.DataFrameVectorizer(sparse=True, sort=True, column_descriptions=self.column_descriptions)))
 
 
-        if self.perform_feature_selection:
+        if self.perform_feature_selection == True or (self.compute_power >= 9 and self.perform_feature_selection == None):
             if trained_pipeline is not None:
                 # This is the step we are trying to remove from the trained_pipeline, since it has already been combined with dv using dv.restrict
                 pass
@@ -177,7 +177,6 @@ class Predictor(object):
         else:
             final_model = utils_models.get_model_from_name(model_name)
             pipeline_list.append(('final_model', utils_model_training.FinalModelATC(model=final_model, model_name=model_name, type_of_estimator=self.type_of_estimator, ml_for_analytics=self.ml_for_analytics, name=self.name)))
-
 
         constructed_pipeline = Pipeline(pipeline_list)
         return constructed_pipeline
@@ -514,10 +513,12 @@ class Predictor(object):
         else:
             X_df = raw_training_data
 
-        if len(X_df.columns) < 50 and perform_feature_selection != True:
-            perform_feature_selection = False
-        else:
-            perform_feature_selection = True
+        # Unless the user has told us to, don't perform feature selection unless we have a pretty decent amount of data
+        if perform_feature_selection == None and self.compute_power < 9:
+            if len(X_df.columns) < 50 or len(X_df) < 100000:
+                perform_feature_selection = False
+            else:
+                perform_feature_selection = True
 
         self.perform_feature_selection = perform_feature_selection
 
@@ -685,12 +686,6 @@ class Predictor(object):
                     print('The results from the X_test and y_test data passed into ml_for_analytics (which were not used for training- true holdout data)')
                     print(self.output_column + ':')
                     print(holdout_data_score)
-
-
-            if self.X_test and self.y_test:
-                print('The results from the X_test and y_test data passed into ml_for_analytics (which were not used for training- true holdout data) are:')
-                holdout_data_score = self.score(self.X_test, self.y_test)
-                print(holdout_data_score)
 
                 try:
                     # We want our score on the holdout data to be the first thing in our pipeline results tuple. This is what we will be selecting our best model from.
