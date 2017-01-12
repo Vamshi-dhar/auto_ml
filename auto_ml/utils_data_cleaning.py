@@ -1,8 +1,12 @@
-import pandas as pd
 import datetime
-from sklearn.base import BaseEstimator, TransformerMixin
 import dateutil
+
+import pandas as pd
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.feature_extraction.text import TfidfVectorizer
+
+import warnings
+
 
 
 # The easiest way to check against a bunch of different bad values is to convert whatever val we have into a string, then check it against a set containing the string representation of a bunch of bad values
@@ -79,14 +83,17 @@ class BasicDataCleaning(BaseEstimator, TransformerMixin):
         for key in X_df.columns:
             # col_desc = self.column_descriptions.get(key, False)
             if key in self.text_columns:
-                    self.text_columns[key].fit(X_df[key])
+                    self.text_columns[key].fit(X_df[key].astype(str, raise_on_error=False))
 
         return self
 
     def transform(self, X, y=None):
+
         # Convert input to DataFrame if we were given a list of dictionaries
         if isinstance(X, list):
             X = pd.DataFrame(X)
+
+        X = X.copy()
 
         # All of these are values we will not want to keep for training this particular estimator.
         # Note that we have already split out the output column and saved it into it's own variable
@@ -124,9 +131,34 @@ class BasicDataCleaning(BaseEstimator, TransformerMixin):
                     pass
 
                 elif col_desc in (None, 'continuous', 'numerical', 'float', 'int'):
+                    # Make sure this isn't actually a date column, and if it is, give the user good information on how to fix this
+                    is_unmarked_date_col = False
+                    try:
+                        pd.to_datetime(X[key])
+                        is_unmarked_date_col = True
+                    except:
+                        pass
                     # For all of our numerical columns, try to turn all of these values into floats
                     # This function handles commas inside strings that represent numbers, and returns nan if we cannot turn this value into a float. nans are ignored in DataFrameVectorizer
-                    X[key] = X[key].apply(clean_val_nan_version)
+                    try:
+                        X[key] = X[key].apply(clean_val_nan_version)
+                    except TypeError as e:
+                        if is_unmarked_date_col == True:
+                            print('\n\n\n')
+                            print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+                            print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+                            print('We have found a column that is not marked as a "date" column, but can be converted to dates.')
+                            print('The name of this column is:\n')
+                            print(key)
+                            print('\nThis column causes errors when we try to parse it as a numerical column.')
+                            print('If it is in fact a date column, please add this to the column_descriptions hash:')
+                            print('{' + key + ': date}')
+                            warnings.warn('UnmarkedDateColumn: Please mark the ' + key + ' column as being a date column in your column_descriptions dictionary.')
+                            print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+                            print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n\n\n')
+                        raise(e)
+
+
 
                 elif col_desc == 'date':
                     X = add_date_features_df(X, key)
@@ -144,7 +176,7 @@ class BasicDataCleaning(BaseEstimator, TransformerMixin):
 
                     col_names = ['nlp_' + key + '_' + str(word) for word in col_names]
 
-                    nlp_matrix = self.text_columns[key].transform(X[key].values)
+                    nlp_matrix = self.text_columns[key].transform(X[key].astype(str, raise_on_error=False))
                     nlp_matrix = nlp_matrix.toarray()
 
                     text_df = pd.DataFrame(nlp_matrix)
@@ -166,6 +198,7 @@ class BasicDataCleaning(BaseEstimator, TransformerMixin):
                     print(key)
                     print('And here is the value for this column passed into column_descriptions:')
                     print(col_desc)
+                    warnings.warn('UnknownValueInColumnDescriptions: Please make sure all the values you pass into column_descriptions are valid.')
 
         # Historically we've deleted columns here. However, we're moving this to DataFrameVectorizer as part of a broader effort to reduce duplicate computation
         # if len(cols_to_drop) > 0:
@@ -198,10 +231,14 @@ def add_date_features_df(df, date_col):
     df.is_copy = False
 
     df[date_col] = pd.to_datetime(df[date_col])
-    df[date_col + '_day_of_week'] = df[date_col].apply(lambda x: x.weekday()).astype(int)
-    df[date_col + '_hour'] = df[date_col].apply(lambda x: x.hour).astype(int)
+    df[date_col + '_day_of_week'] = df[date_col].apply(lambda x: x.weekday()).astype(int, raise_on_error=False)
 
-    df[date_col + '_minutes_into_day'] = df[date_col].apply(lambda x: x.hour * 60 + x.minute)
+    try:
+        df[date_col + '_hour'] = df[date_col].apply(lambda x: x.hour).astype(int, raise_on_error=False)
+
+        df[date_col + '_minutes_into_day'] = df[date_col].apply(lambda x: x.hour * 60 + x.minute)
+    except AttributeError:
+        pass
 
     df[date_col + '_is_weekend'] = df[date_col].apply(lambda x: x.weekday() in (5,6))
     df[date_col + '_day_part'] = df[date_col + '_minutes_into_day'].apply(minutes_into_day_parts)
@@ -230,9 +267,13 @@ def add_date_features_dict(row, date_col):
 
 
     date_feature_dict[date_col + '_day_of_week'] = date_val.weekday()
-    date_feature_dict[date_col + '_hour'] = date_val.hour
+    # nesting this inside a try/except block because the date might be a datetime.date, not a datetime.datetime
+    try:
+        date_feature_dict[date_col + '_hour'] = date_val.hour
 
-    date_feature_dict[date_col + '_minutes_into_day'] = date_val.hour * 60 + date_val.minute
+        date_feature_dict[date_col + '_minutes_into_day'] = date_val.hour * 60 + date_val.minute
+    except AttributeError:
+        pass
 
     date_feature_dict[date_col + '_is_weekend'] = date_val.weekday() in (5,6)
 

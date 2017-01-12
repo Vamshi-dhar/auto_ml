@@ -67,7 +67,7 @@ def calculate_brier_score_loss(actuals, probas):
     return -1 * brier_score_loss(actuals, probas)
 
 
-def make_titanic_ensemble(df_titanic_train):
+def make_titanic_ensemble(df_titanic_train, method='median'):
     column_descriptions = {
         'survived': 'output'
         , 'embarked': 'categorical'
@@ -126,7 +126,46 @@ def make_titanic_ensemble(df_titanic_train):
         }
     ]
 
-    ml_predictor.train_ensemble(data=df_titanic_train, ensemble_training_list=ensemble_list)
+    ml_predictor.train_ensemble(data=df_titanic_train, ensemble_training_list=ensemble_list, ensemble_method=method)
 
     return ml_predictor
 
+
+def get_twitter_sentiment_multilabel_classification_dataset():
+
+    file_name = os.path.join('tests', 'twitter_sentiment.csv')
+
+    try:
+        df_twitter = pd.read_csv(open(file_name,'rU'), encoding='utf-8', engine='python')
+    except Exception as e:
+        print('Error')
+        print(e)
+        dataset_url = 'https://raw.githubusercontent.com/ClimbsRocks/sample_datasets/master/twitter_airline_sentiment.csv'
+        df_twitter = pd.read_csv(dataset_url)
+        # Do not write the index that pandas automatically creates
+
+        df_twitter.to_csv(file_name, index=False)
+
+    # Grab only 10% of the dataset- runs much faster this way
+    df_twitter = df_twitter.sample(frac=0.1)
+
+    df_twitter['tweet_created'] = pd.to_datetime(df_twitter.tweet_created)
+
+    df_twitter_train, df_twitter_test = train_test_split(df_twitter, test_size=0.33, random_state=42)
+    return df_twitter_train, df_twitter_test
+
+
+def train_basic_multilabel_classifier(df_twitter_train):
+    column_descriptions = {
+        'airline_sentiment': 'output'
+        , 'airline': 'categorical'
+        , 'text': 'ignore'
+        , 'tweet_location': 'categorical'
+        , 'user_timezone': 'categorical'
+        , 'tweet_created': 'date'
+    }
+
+    ml_predictor = Predictor(type_of_estimator='classifier', column_descriptions=column_descriptions)
+    ml_predictor.train(df_twitter_train)
+
+    return ml_predictor

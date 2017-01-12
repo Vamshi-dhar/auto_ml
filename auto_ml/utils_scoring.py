@@ -1,17 +1,29 @@
 from collections import OrderedDict
+import multiprocessing
+import pathos
 from sklearn.ensemble import GradientBoostingRegressor, GradientBoostingClassifier
 
 import math
-from sklearn.metrics import mean_squared_error, make_scorer, brier_score_loss, accuracy_score, explained_variance_score, mean_absolute_error, median_absolute_error, r2_score
+from sklearn.metrics import mean_squared_error, make_scorer, brier_score_loss, accuracy_score, explained_variance_score, mean_absolute_error, median_absolute_error, r2_score, log_loss, roc_auc_score
+import numpy as np
+import pandas as pd
 
+bad_vals_as_strings = set([str(float('nan')), str(float('inf')), str(float('-inf')), 'None', 'none', 'NaN', 'NAN', 'nan', 'NULL', 'null', '', 'inf', '-inf'])
 
 def advanced_scoring_classifiers(probas, actuals, name=None):
 
-    print('Here is our brier-score-loss, which is the value we optimized for while training, and is the value returned from .score()')
+    print('Here is our brier-score-loss, which is the default value we optimized for while training, and is the value returned from .score() unless you requested a custom scoring metric')
     print('It is a measure of how close the PROBABILITY predictions are.')
     if name != None:
         print(name)
-    print(brier_score_loss(actuals, probas))
+
+    # Sometimes we will be given "flattened" probabilities (only the probability of our positive label), while other times we might be given "nested" probabilities (probabilities of both positive and negative, in a list, for each item).
+    try:
+        probas = [proba[1] for proba in probas]
+    except:
+        pass
+
+    print(format(brier_score_loss(actuals, probas), '.4f'))
 
     print('\nHere is the trained estimator\'s overall accuracy (when it predicts a label, how frequently is that the correct label?)')
     predicted_labels = []
@@ -20,7 +32,7 @@ def advanced_scoring_classifiers(probas, actuals, name=None):
             predicted_labels.append(1)
         else:
             predicted_labels.append(0)
-    print(accuracy_score(y_true=actuals, y_pred=predicted_labels))
+    print(format(accuracy_score(y_true=actuals, y_pred=predicted_labels) * 100, '.1f') + '%')
 
     print('Here is the accuracy of our trained estimator at each level of predicted probabilities')
 
@@ -89,6 +101,14 @@ def advanced_scoring_regressors(predictions, actuals, verbose=2, name=None):
     print('\nHere is the average actual value on this validation set:')
     print(sum(actuals) * 1.0 / len(actuals))
 
+    # 2(a). median predictions
+    print('\nHere is the median prediction:')
+    print(np.median(predictions))
+
+    # 3(a). median actuals
+    print('\nHere is the median actual value:')
+    print(np.median(actuals))
+
     # 4. avg differences (not RMSE)
     print('\nHere is the mean absolute error:')
     print(mean_absolute_error(actuals, predictions))
@@ -135,43 +155,131 @@ def advanced_scoring_regressors(predictions, actuals, verbose=2, name=None):
     print('')
     print('\n***********************************************\n\n')
 
+def rmse_func(y, predictions):
+    return mean_squared_error(y, predictions)**0.5
 
 
-def rmse_scoring(estimator, X, y, took_log_of_y=False, advanced_scoring=False, verbose=2, name=None, scoring='rmse'):
-    if isinstance(estimator, GradientBoostingRegressor):
-        X = X.toarray()
-    predictions = estimator.predict(X)
-    if took_log_of_y:
-        for idx, val in enumerate(predictions):
-            predictions[idx] = math.exp(val)
-
-    if scoring == 'rmse':
-        score = mean_squared_error(y, predictions)**0.5
-    elif scoring == 'median_absolute_error':
-        score = median_absolute_error(y, predictions)
-    if advanced_scoring == True:
-        if hasattr(estimator, 'name'):
-            print(estimator.name)
-        advanced_scoring_regressors(predictions, y, verbose=verbose, name=name)
-    return - 1 * score
+scoring_name_function_map = {
+    'rmse': rmse_func
+    , 'median_absolute_error': median_absolute_error
+    , 'r2': r2_score
+    , 'r-squared': r2_score
+    , 'mean_absolute_error': mean_absolute_error
+    , 'accuracy': accuracy_score
+    , 'accuracy_score': accuracy_score
+    , 'log_loss': log_loss
+    , 'roc_auc': roc_auc_score
+    , 'brier_score_loss': brier_score_loss
+}
 
 
-def brier_score_loss_wrapper(estimator, X, y, advanced_scoring=False):
-    if isinstance(estimator, GradientBoostingClassifier):
-        X = X.toarray()
-    clean_ys = []
-    # try:
-    for val in y:
-        val = int(val)
-        clean_ys.append(val)
-    y = clean_ys
-    # except:
-    #     pass
-    predictions = estimator.predict_proba(X)
-    probas = [row[1] for row in predictions]
-    score = brier_score_loss(y, probas)
-    if advanced_scoring:
-        return (-1 * score, probas)
-    else:
-        return -1 * score
+class RegressionScorer(object):
 
+    def __init__(self, scoring_method=None):
+
+        if scoring_method is None:
+            scoring_method = 'rmse'
+
+        self.scoring_method = scoring_method
+
+        if callable(scoring_method):
+            self.scoring_func = scoring_method
+        else:
+            self.scoring_func = scoring_name_function_map[scoring_method]
+
+        self.scoring_method = scoring_method
+
+
+    def score(self, estimator, X, y, took_log_of_y=False, advanced_scoring=False, verbose=2, name=None):
+        if isinstance(estimator, GradientBoostingRegressor):
+            X = X.toarray()
+
+        predictions = estimator.predict(X)
+
+        if took_log_of_y:
+            for idx, val in enumerate(predictions):
+                predictions[idx] = math.exp(val)
+
+        try:
+            score = self.scoring_func(y, predictions)
+        except ValueError:
+
+            bad_val_indices = []
+            for idx, val in enumerate(y):
+                if str(val) in bad_vals_as_strings:
+                    bad_val_indices.append(idx)
+
+            predictions = [val for idx, val in enumerate(predictions) if idx not in bad_val_indices]
+            y = [val for idx, val in enumerate(y) if idx not in bad_val_indices]
+
+            print('Found ' + str(len(bad_val_indices)) + 'null or infinity values in the y values. We will ignore these, and report the score on the rest of the dataset')
+            score = self.scoring_func(y, predictions)
+
+        # if scoring == 'rmse':
+        #     score = mean_squared_error(y, predictions)**0.5
+        # elif scoring == 'median_absolute_error':
+        #     score = median_absolute_error(y, predictions)
+
+        if advanced_scoring == True:
+            if hasattr(estimator, 'name'):
+                print(estimator.name)
+            advanced_scoring_regressors(predictions, y, verbose=verbose, name=name)
+        return - 1 * score
+
+
+class ClassificationScorer(object):
+
+    def __init__(self, scoring_method=None):
+
+        if scoring_method is None:
+            scoring_method = 'brier_score_loss'
+
+        if callable(scoring_method):
+            self.scoring_func = scoring_method
+        else:
+            self.scoring_func = scoring_name_function_map[scoring_method]
+
+        self.scoring_method = scoring_method
+
+
+    def score(self, estimator, X, y, advanced_scoring=False):
+        if isinstance(estimator, GradientBoostingClassifier):
+            X = X.toarray()
+        # clean_ys = []
+        # # try:
+        # for val in y:
+        #     val = int(val)
+        #     clean_ys.append(val)
+        # y = clean_ys
+        # except:
+        #     pass
+
+        predictions = estimator.predict_proba(X)
+
+        if self.scoring_method == 'brier_score_loss':
+            probas = [row[1] for row in predictions]
+            predictions = probas
+        # score = brier_score_loss(y, probas)
+
+        # if self.scoring_method in ['accuracy_score', 'accuracy']:
+        #     predictions = [1 if x[1] >= 0.5 else 0 for x in predictions]
+
+        try:
+            score = self.scoring_func(y, predictions)
+        except ValueError:
+            bad_val_indices = []
+            for idx, val in enumerate(y):
+                if str(val) in bad_vals_as_strings:
+                    bad_val_indices.append(idx)
+
+            predictions = [val for idx, val in enumerate(predictions) if idx not in bad_val_indices]
+            y = [val for idx, val in enumerate(y) if idx not in bad_val_indices]
+
+            print('Found ' + str(len(bad_val_indices)) + 'null or infinity values in the y values. We will ignore these, and report the score on the rest of the dataset')
+            score = self.scoring_func(y, predictions)
+
+
+        if advanced_scoring:
+            return (-1 * score, predictions)
+        else:
+            return -1 * score

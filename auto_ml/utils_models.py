@@ -55,11 +55,70 @@ def get_model_from_name(model_name):
         'MiniBatchKMeans': MiniBatchKMeans(n_clusters=8)
     }
     if xgb_installed:
-        model_map['XGBClassifier'] = xgb.XGBClassifier(colsample_bytree=0.8, min_child_weight=5, max_depth=1, subsample=1.0, learning_rate=0.1)
-        model_map['XGBRegressor'] = xgb.XGBRegressor()
+        model_map['XGBClassifier'] = xgb.XGBClassifier(colsample_bytree=0.8, min_child_weight=5, subsample=1.0, learning_rate=0.1, n_estimators=200, nthread=-1)
+        model_map['XGBRegressor'] = xgb.XGBRegressor(nthread=-1, n_estimators=200)
 
     return model_map[model_name]
 
+def get_name_from_model(model):
+    if isinstance(model, LogisticRegression):
+        return 'LogisticRegression'
+    if isinstance(model, RandomForestClassifier):
+        return 'RandomForestClassifier'
+    if isinstance(model, RidgeClassifier):
+        return 'RidgeClassifier'
+    if isinstance(model, GradientBoostingClassifier):
+        return 'GradientBoostingClassifier'
+    if isinstance(model, ExtraTreesClassifier):
+        return 'ExtraTreesClassifier'
+    if isinstance(model, AdaBoostClassifier):
+        return 'AdaBoostClassifier'
+    if isinstance(model, SGDClassifier):
+        return 'SGDClassifier'
+    if isinstance(model, Perceptron):
+        return 'Perceptron'
+    if isinstance(model, PassiveAggressiveClassifier):
+        return 'PassiveAggressiveClassifier'
+    if isinstance(model, LinearRegression):
+        return 'LinearRegression'
+    if isinstance(model, RandomForestRegressor):
+        return 'RandomForestRegressor'
+    if isinstance(model, Ridge):
+        return 'Ridge'
+    if isinstance(model, ExtraTreesRegressor):
+        return 'ExtraTreesRegressor'
+    if isinstance(model, AdaBoostRegressor):
+        return 'AdaBoostRegressor'
+    if isinstance(model, RANSACRegressor):
+        return 'RANSACRegressor'
+    if isinstance(model, GradientBoostingRegressor):
+        return 'GradientBoostingRegressor'
+    if isinstance(model, Lasso):
+        return 'Lasso'
+    if isinstance(model, ElasticNet):
+        return 'ElasticNet'
+    if isinstance(model, LassoLars):
+        return 'LassoLars'
+    if isinstance(model, OrthogonalMatchingPursuit):
+        return 'OrthogonalMatchingPursuit'
+    if isinstance(model, BayesianRidge):
+        return 'BayesianRidge'
+    if isinstance(model, ARDRegression):
+        return 'ARDRegression'
+    if isinstance(model, SGDRegressor):
+        return 'SGDRegressor'
+    if isinstance(model, PassiveAggressiveRegressor):
+        return 'PassiveAggressiveRegressor'
+    if isinstance(model, MiniBatchKMeans):
+        return 'MiniBatchKMeans'
+    # Putting these at the end. By this point, we've already determined it is not any of our other models
+    if isinstance(model, xgb.XGBClassifier):
+        return 'XGBClassifier'
+    if isinstance(model, xgb.XGBRegressor):
+        return 'XGBRegressor'
+
+    # if isinstance(model, KerasRegressor):
+    #     return 'KerasRegressor'
 
 # Hyperparameter search spaces for each model
 def get_search_params(model_name):
