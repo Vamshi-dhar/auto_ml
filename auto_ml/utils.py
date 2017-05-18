@@ -1,68 +1,11 @@
-from collections import OrderedDict
 import csv
 import datetime
-import itertools
-import dateutil
-import math
 import os
-import random
 
-# from keras.constraints import maxnorm
-# from keras.layers import Dense, Dropout
-# from keras.models import Sequential
-# from keras.wrappers.scikit_learn import KerasRegressor, KerasClassifier
+from sklearn.datasets import load_boston
+from sklearn.model_selection import train_test_split
 
-from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.cluster import MiniBatchKMeans
-# from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, ExtraTreesRegressor, AdaBoostRegressor, GradientBoostingRegressor, GradientBoostingClassifier, ExtraTreesClassifier, AdaBoostClassifier
-from sklearn.feature_selection import GenericUnivariateSelect, RFECV, SelectFromModel
-# from sklearn.grid_search import GridSearchCV, RandomizedSearchCV
-# from sklearn.linear_model import RandomizedLasso, RandomizedLogisticRegression, RANSACRegressor, LinearRegression, Ridge, Lasso, ElasticNet, LassoLars, OrthogonalMatchingPursuit, BayesianRidge, ARDRegression, SGDRegressor, PassiveAggressiveRegressor, LogisticRegression, RidgeClassifier, SGDClassifier, Perceptron, PassiveAggressiveClassifier
-from sklearn.metrics import mean_squared_error, make_scorer, brier_score_loss, accuracy_score, explained_variance_score, mean_absolute_error, median_absolute_error, r2_score
-from sklearn.preprocessing import LabelBinarizer, OneHotEncoder
-from sklearn.feature_extraction.text import TfidfVectorizer
-
-import numpy as np
 import pandas as pd
-import pathos
-import scipy
-
-# XGBoost can be a pain to install. It's also a super powerful and effective package.
-# So we'll make it optional here. If a user wants to install XGBoost themselves, we fully support XGBoost!
-# But, if they just want to get running out of the gate, without dealing with any installation other than what's done for them automatically, we won't force them to go through that.
-# The same logic will apply to deep learning with Keras and TensorFlow
-global xgb_installed
-xgb_installed = False
-try:
-    import xgboost as xgb
-    xgb_installed = True
-except NameError:
-    pass
-except ImportError:
-    pass
-
-if xgb_installed:
-    import xgboost as xgb
-
-
-
-# TODO: figure out later on how to wrap this inside another wrapper or something to make num_cols more dynamic
-# def make_deep_learning_model(num_cols=250, optimizer='adam', dropout_rate=0.2, weight_constraint=0, shape='standard'):
-#     model = Sequential()
-#     # Add a dense hidden layer, with num_nodes = num_cols, and telling it that the incoming input dimensions also = num_cols
-#     model.add(Dense(num_cols, input_dim=num_cols, activation='relu', init='normal', W_constraint=maxnorm(weight_constraint)))
-#     model.add(Dropout(dropout_rate))
-#     model.add(Dense(num_cols, activation='relu', init='normal', W_constraint=maxnorm(weight_constraint)))
-#     model.add(Dense(num_cols, activation='relu', init='normal', W_constraint=maxnorm(weight_constraint)))
-#     # For regressors, we want an output layer with a single node
-#     # For classifiers, we'll want to add in some other processing here (like a softmax activation function)
-#     model.add(Dense(1, init='normal'))
-
-#     # The final step is to compile the model
-#     # TODO: see if we can pass in our own custom loss function here
-#     model.compile(loss='mean_squared_error', optimizer=optimizer)
-
-#     return model
 
 
 def write_gs_param_results_to_file(trained_gs, most_recent_filename):
@@ -133,3 +76,64 @@ def safely_drop_columns(df, cols_to_drop):
     df = df.drop(safe_cols_to_drop, axis=1)
     return df
 
+
+def drop_duplicate_columns(df):
+    cols = list(df.columns)
+    for idx, item in enumerate(df.columns):
+        if item in df.columns[:idx]:
+            print('#####################################################')
+            print('We found a duplicate column, and will be removing it')
+            print('If you intended to send in two different pieces of information, please make sure they have different column names')
+            print('Here is the duplicate column:')
+            print(item)
+            print('#####################################################')
+            cols[idx] = "toDROP"
+    df.columns = cols
+
+    try:
+        df = df.drop("toDROP", axis=1)
+    except:
+        pass
+    return df
+
+
+def get_boston_dataset():
+    boston = load_boston()
+    df_boston = pd.DataFrame(boston.data)
+    df_boston.columns = boston.feature_names
+    df_boston['MEDV'] = boston['target']
+    df_boston_train, df_boston_test = train_test_split(df_boston, test_size=0.2, random_state=42)
+    return df_boston_train, df_boston_test
+
+bad_vals_as_strings = set([str(float('nan')), str(float('inf')), str(float('-inf')), 'None', 'none', 'NaN', 'NAN', 'nan', 'NULL', 'null', '', 'inf', '-inf'])
+
+def drop_missing_y_vals(df, y, output_column=None):
+
+    y = list(y)
+    indices_to_drop = []
+
+    for idx, val in enumerate(y):
+        if str(val) in bad_vals_as_strings:
+            indices_to_drop.append(idx)
+
+    if len(indices_to_drop) > 0:
+        set_of_indices_to_drop = set(indices_to_drop)
+
+        print('We encountered a number of missing values for this output column')
+        if output_column is not None:
+            print(output_column)
+        print('And here is the number of missing (nan, None, etc.) values for this column:')
+        print(len(indices_to_drop))
+        print('Here are some example missing values')
+        for idx, df_idx in enumerate(indices_to_drop):
+            if idx >= 5:
+                break
+            print(y[df_idx])
+        print('We will remove these values, and continue with training on the cleaned dataset')
+
+        support_mask = [True if idx not in set_of_indices_to_drop else False for idx in range(len(df)) ]
+        df = df[support_mask]
+        y = [val for idx, val in enumerate(y) if idx not in set_of_indices_to_drop]
+
+
+    return df, y

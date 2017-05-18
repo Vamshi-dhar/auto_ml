@@ -1,5 +1,5 @@
 # auto_ml
-> Get a trained and optimized machine learning predictor at the push of a button (and, admittedly, an extended coffee break while your computer does the heavy lifting and you get to claim "compiling" https://xkcd.com/303/).
+> Automated machine learning for production and analytics
 
 [![Build Status](https://travis-ci.org/ClimbsRocks/auto_ml.svg?branch=master)](https://travis-ci.org/ClimbsRocks/auto_ml)
 [![Documentation Status](http://readthedocs.org/projects/auto-ml/badge/?version=latest)](http://auto-ml.readthedocs.io/en/latest/?badge=latest)
@@ -12,28 +12,37 @@
 
 - `pip install auto_ml`
 
-OR
+## Getting started
 
-- `git clone https://github.com/ClimbsRocks/auto_ml`
-- `pip install -r requirements.txt`
-
-
-## Getting Started
-
-```
-import dill
-import pandas as pd
-from sklearn.datasets import load_boston
-from sklearn.model_selection import train_test_split
-
+```python
 from auto_ml import Predictor
+from auto_ml.utils import get_boston_dataset
+
+df_train, df_test = get_boston_dataset()
+
+column_descriptions = {
+    'MEDV': 'output'
+    , 'CHAS': 'categorical'
+}
+
+ml_predictor = Predictor(type_of_estimator='regressor', column_descriptions=column_descriptions)
+
+ml_predictor.train(df_train)
+
+ml_predictor.score(df_test, df_test.MEDV)
+```
+
+## Show off some more features!
+
+auto_ml is designed for production. Here's an example that includes serializing and loading the trained model, then getting predictions on single dictionaries, roughly the process you'd likely follow to deploy the trained model.
+
+```python
+from auto_ml import Predictor
+from auto_ml.utils import get_boston_dataset
+from auto_ml.utils_models import load_ml_model
 
 # Load data
-boston = load_boston()
-df_boston = pd.DataFrame(boston.data)
-df_boston.columns = boston.feature_names
-df_boston['MEDV'] = boston['target']
-df_boston_train, df_boston_test = train_test_split(df_boston, test_size=0.2, random_state=42)
+df_train, df_test = get_boston_dataset()
 
 # Tell auto_ml which column is 'output'
 # Also note columns that aren't purely numerical
@@ -45,10 +54,10 @@ column_descriptions = {
 
 ml_predictor = Predictor(type_of_estimator='regressor', column_descriptions=column_descriptions)
 
-ml_predictor.train(df_boston_train)
+ml_predictor.train(df_train)
 
 # Score the model on test data
-test_score = ml_predictor.score(df_boston_test, df_boston_test.MEDV)
+test_score = ml_predictor.score(df_test, df_test.MEDV)
 
 # auto_ml is specifically tuned for running in production
 # It can get predictions on an individual row (passed in as a dictionary)
@@ -56,17 +65,61 @@ test_score = ml_predictor.score(df_boston_test, df_boston_test.MEDV)
 # Here we will demonstrate saving the trained model, and loading it again
 file_name = ml_predictor.save()
 
-# dill is a drop-in replacement for pickle that handles functions better
-with open (file_name, 'rb') as read_file:
-    trained_model = dill.load(read_file)
+trained_model = load_ml_model(file_name)
 
 # .predict and .predict_proba take in either:
 # A pandas DataFrame
 # A list of dictionaries
 # A single dictionary (optimized for speed in production evironments)
-predictions = trained_model.predict(df_boston_test)
+predictions = trained_model.predict(df_test)
 print(predictions)
 ```
+
+## XGBoost, Deep Learning with TensorFlow & Keras, and LightGBM
+
+auto_ml has all three of these awesome libraries integrated!
+Generally, just pass one of them in for model_names.
+`ml_predictor.train(data, model_names=['DeepLearningClassifier'])`
+
+Available options are
+- `DeepLearningClassifier` and `DeepLearningRegressor`
+- `XGBClassifier` and `XGBRegressor`
+- `LGBMClassifer` and `LGBMRegressor`
+
+All of these projects are ready for production. These projects all have prediction time in the 1 millisecond range for a single prediction, and are able to be serialized to disk and loaded into a new environment after training.
+
+Depending on your machine, they can occasionally be difficult to install, so they are not included in auto_ml's default installation. You are responsible for installing them yourself. auto_ml will run fine without them installed (we check what's isntalled before choosing which algorithm to use). If you want to try the easy install, just `pip install -r advanced_requirements.txt`, which will install TensorFlow, Keras, and XGBoost. LightGBM is not available as a pip install currently.
+
+
+## Classification
+
+Binary and multiclass classification are both supported. Note that for now, labels must be integers (0 and 1 for binary classification). auto_ml will automatically detect if it is a binary or multiclass classification problem- you just have to pass in `ml_predictor = Predictor(type_of_estimator='classifier', column_descriptions=column_descriptions)`
+
+
+## Feature Learning
+
+Also known as "finally found a way to make this deep learning stuff useful for my business". Deep Learning is great at learning important features from your data. But the way it turns these learned features into a final prediction is relatively basic. Gradient boosting is great at turning features into accurate predictions, but it doesn't do any feature learning.
+
+In auto_ml, you can now automatically use both types of models for what they're great at. If you pass `feature_learning=True, fl_data=some_dataframe` to `.train()`, we will do exactly that: train a deep learning model on your `fl_data`. We won't ask it for predictions (standard stacking approach), instead, we'll use it's penultimate layer to get it's 10 most useful features. Then we'll train a gradient boosted model (or any other model of your choice) on those features plus all the original features.
+
+Across some problems, we've witnessed this lead to a 5% gain in accuracy, while still making predictions in 1-4 milliseconds, depending on model complexity.
+
+`ml_predictor.train(df_train, feature_learning=True, fl_data=df_fl_data)`
+
+This feature only supports regression and binary classification currently. The rest of auto_ml supports multiclass classification.
+
+## Categorical Ensembling
+
+Ever wanted to train one market for every store/customer, but didn't want to maintain hundreds of thousands of independent models? With `ml_predictor.train_categorical_ensemble()`, we will handle that for you. You'll still have just one consistent API, `ml_predictor.predict(data)`, but behind this single API will be one model for each category you included in your training data.
+
+Just tell us which column holds the category you want to split on, and we'll handle the rest. As always, saving the model, loading it in a different environment, and getting speedy predictions live in production is baked right in.
+
+`ml_predictor.train_categorical_ensemble(df_train, categorical_column='store_name')`
+
+
+### More details available in the docs
+
+http://auto-ml.readthedocs.io/en/latest/
 
 
 ### Advice
@@ -95,27 +148,11 @@ A quick overview of buzzwords, this project automates:
 - Data formatting (turning a DataFrame or a list of dictionaries into a sparse matrix, one-hot encoding categorical variables, taking the natural log of y for regression problems, etc).
 - Model Selection (which model works best for your problem- we try roughly a dozen apiece for classification and regression problems, including favorites like XGBoost if it's installed on your machine).
 - Hyperparameter Optimization (what hyperparameters work best for that model).
-- Ensembling (Train up a bunch of different estimators, then train a final estimator to intelligently aggregate them together. Also useful if you're just trying to compare many different models and see what works best.)
+<!-- - Ensembling (Train up a bunch of different estimators, then train a final estimator to intelligently aggregate them together. Also useful if you're just trying to compare many different models and see what works best.) -->
 - Big Data (feed it lots of data- it's fairly efficient with resources).
 - Unicorns (you could conceivably train it to predict what is a unicorn and what is not).
 - Ice Cream (mmm, tasty...).
 - Hugs (this makes it much easier to do your job, hopefully leaving you more time to hug those those you care about).
-
-
-<!--
-
-#### Passing in your own feature engineering function
-
-You can pass in your own function to perform feature engineering on the data. This will be called as the first step in the pipeline that `auto_ml` builds out.
-
-You will be passed the entire X dataset (not the y dataset), and are expected to return the entire X dataset in the same order.
-
-The advantage of including it in the pipeline is that it will then be applied to any data you want predictions on later. You will also eventually be able to run GridSearchCV over any parameters you include here.
-
-Limitations:
-You cannot alter the length or ordering of the X dataset, since you will not have a chance to modify the y dataset. If you want to perform filtering, perform it before you pass in the data to train on.
-
- -->
 
 
 ### Running the tests
@@ -123,4 +160,6 @@ You cannot alter the length or ordering of the X dataset, since you will not hav
 If you've cloned the source code and are making any changes (highly encouraged!), or just want to make sure everything works in your environment, run
 `nosetests -v tests`.
 
-The tests are pretty comprehensive, though as with everything with auto_ml, I happily welcome your contributions here!
+CI is also set up, so if you're developing on this, you can just open a PR, and the tests will run automatically on Travis-CI.
+
+The tests are relatively comprehensive, though as with everything with auto_ml, I happily welcome your contributions here!

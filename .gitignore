@@ -21,3 +21,5 @@ xgboost/*
 *.pgz
 *.dill
 .coverage*
+LightGBM/
+.eggs/*

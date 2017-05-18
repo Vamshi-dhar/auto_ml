@@ -1,28 +1,34 @@
+import os
+
+import numpy as np
 import pandas as pd
 import scipy
 from sklearn.base import BaseEstimator, TransformerMixin
 import warnings
+
+from auto_ml import utils_models
+from auto_ml.utils_models import get_name_from_model
+
+keras_installed = False
 try:
-    from auto_ml.utils_scoring import ClassificationScorer, RegressionScorer
-    from auto_ml.utils_models import get_model_from_name, get_name_from_model
-except ImportError:
-    from ..auto_ml.utils_scoring import ClassificationScorer, RegressionScorer
-    from ..auto_ml.utils_models import get_model_from_name, get_name_from_model
+    # Suppress some level of logs
+    os.environ['TF_CPP_MIN_VLOG_LEVEL'] = '3'
+    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+    from keras.wrappers.scikit_learn import KerasRegressor, KerasClassifier
+    keras_installed = True
+except:
+    pass
+
+
 # This is the Air Traffic Controller (ATC) that is a wrapper around sklearn estimators.
 # In short, it wraps all the methods the pipeline will look for (fit, score, predict, predict_proba, etc.)
 # However, it also gives us the ability to optimize this stage in conjunction with the rest of the pipeline.
 # It also gives us more granular control over things like turning the input for GradientBoosting into dense matrices, or appending a set of dummy 1's to the end of sparse matrices getting predictions from XGBoost.
-# TODO: make sure we can actually get the params from GridSearchCV.
-    # Might have to do something tricky, like have a hold-all function that does nothing but get the params from GridSearchCV inside __init__
-        # So, self.model might just be a dictionary or something
-        # Or, a function that takes in anything as kwargs, and sets them on a dictionary, then returns that dictionary
-    # And then that function does nothing but return those params
-    # And we create a model using that inside fit
 
 class FinalModelATC(BaseEstimator, TransformerMixin):
 
 
-    def __init__(self, model, model_name=None, ml_for_analytics=False, type_of_estimator='classifier', output_column=None, name=None, scoring_method=None, training_features=None, column_descriptions=None):
+    def __init__(self, model, model_name=None, ml_for_analytics=False, type_of_estimator='classifier', output_column=None, name=None, scoring_method=None, training_features=None, column_descriptions=None, feature_learning=False):
 
         self.model = model
         self.model_name = model_name
@@ -31,6 +37,7 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
         self.name = name
         self.training_features = training_features
         self.column_descriptions = column_descriptions
+        self.feature_learning = feature_learning
 
 
         if self.type_of_estimator == 'classifier':
@@ -39,44 +46,60 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
             self._scorer = scoring_method
 
 
+    def get(self, prop_name, default=None):
+        try:
+            return getattr(self, prop_name)
+        except AttributeError:
+            return default
+
+
     def fit(self, X, y):
         self.model_name = get_name_from_model(self.model)
 
-        # if self.model_name[:3] == 'XGB' and scipy.sparse.issparse(X):
-        #     ones = [[1] for x in range(X.shape[0])]
-        #     # Trying to force XGBoost to play nice with sparse matrices
-        #     X_fit = scipy.sparse.hstack((X, ones))
-
-        # else:
-
         X_fit = X
 
-
-        if self.model_name[:12] == 'DeepLearning' or self.model_name in ['BayesianRidge', 'LassoLars', 'OrthogonalMatchingPursuit', 'ARDRegression', 'Perceptron', 'PassiveAggressiveClassifier', 'SGDClassifier', 'RidgeClassifier', 'LogisticRegression', ]:
+        if self.model_name[:12] == 'DeepLearning' or self.model_name in ['BayesianRidge', 'LassoLars', 'OrthogonalMatchingPursuit', 'ARDRegression', 'Perceptron', 'PassiveAggressiveClassifier', 'SGDClassifier', 'RidgeClassifier', 'LogisticRegression']:
             if scipy.sparse.issparse(X_fit):
                 X_fit = X_fit.todense()
 
-        #     num_cols = X_fit.shape[1]
-        #     kwargs = {
-        #         'num_cols':num_cols
-        #         , 'nb_epoch': 20
-        #         , 'batch_size': 10
-        #         , 'verbose': 1
-        #     }
-        #     model_params = self.model.get_params()
-        #     del model_params['build_fn']
-        #     for k, v in model_params.items():
-        #         if k not in kwargs:
-        #             kwargs[k] = v
-        #     if self.type_of_estimator == 'regressor':
-        #         self.model = KerasRegressor(build_fn=make_deep_learning_model, **kwargs)
+            if self.model_name[:12] == 'DeepLearning':
+                if keras_installed:
+
+                    # For Keras, we need to tell it how many input nodes to expect, which is our num_cols
+                    num_cols = X_fit.shape[1]
+
+                    model_params = self.model.get_params()
+                    del model_params['build_fn']
+
+                    if self.type_of_estimator == 'regressor':
+                        self.model = KerasRegressor(build_fn=utils_models.make_deep_learning_model, num_cols=num_cols, feature_learning=self.feature_learning, **model_params)
+                    elif self.type_of_estimator == 'classifier':
+                        self.model = KerasClassifier(build_fn=utils_models.make_deep_learning_classifier, num_cols=num_cols, feature_learning=self.feature_learning, **model_params)
+                else:
+                    print('WARNING: We did not detect that Keras was available.')
+                    raise TypeError('A DeepLearning model was requested, but Keras was not available to import')
 
         try:
-            self.model.fit(X_fit, y)
+            if self.model_name[:12] == 'DeepLearning':
+
+                print('\nWe will stop training early if we have not seen an improvement in training accuracy in 25 epochs')
+                from keras.callbacks import EarlyStopping
+                early_stopping = EarlyStopping(monitor='loss', patience=25, verbose=1)
+                self.model.fit(X_fit, y, callbacks=[early_stopping])
+
+            else:
+                self.model.fit(X_fit, y)
+
         except TypeError as e:
             if scipy.sparse.issparse(X_fit):
                 X_fit = X_fit.todense()
-            self.model.fit()
+            self.model.fit(X_fit, y)
+
+        except KeyboardInterrupt as e:
+            print('Stopping training at this point because we heard a KeyboardInterrupt')
+            print('If the model is functional at this point, we will output the model in its latest form')
+            print('Note that not all models can be interrupted and still used, and that this feature generally is an unofficial beta-release feature that is known to fail on occasion')
+            pass
 
         return self
 
@@ -227,12 +250,7 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
 
     def predict_proba(self, X, verbose=False):
 
-        # if self.model_name[:3] == 'XGB' and scipy.sparse.issparse(X):
-        #     ones = [[1] for x in range(X.shape[0])]
-        #     # Trying to force XGBoost to play nice with sparse matrices
-        #     X = scipy.sparse.hstack((X, ones))
-
-        if (self.model_name[:16] == 'GradientBoosting' or self.model_name in ['BayesianRidge', 'LassoLars', 'OrthogonalMatchingPursuit', 'ARDRegression']) and scipy.sparse.issparse(X):
+        if (self.model_name[:16] == 'GradientBoosting' or self.model_name[:12] == 'DeepLearning' or self.model_name in ['BayesianRidge', 'LassoLars', 'OrthogonalMatchingPursuit', 'ARDRegression']) and scipy.sparse.issparse(X):
             X = X.todense()
 
         try:
@@ -264,17 +282,20 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
                     tupled_predictions.append([1,0])
             predictions = tupled_predictions
 
+
+        # This handles an annoying edge case with libraries like Keras that, for a binary classification problem, with return a single predicted probability in a list, rather than the probability of both classes in a list
+        if len(predictions[0]) == 1:
+            tupled_predictions = []
+            for prediction in predictions:
+                tupled_predictions.append([1 - prediction[0], prediction[0]])
+            predictions = tupled_predictions
+
         if X.shape[0] == 1:
             return predictions[0]
         else:
             return predictions
 
     def predict(self, X, verbose=False):
-
-        # if self.model_name[:3] == 'XGB' and scipy.sparse.issparse(X):
-        #     ones = [[1] for x in range(X.shape[0])]
-        #     # Trying to force XGBoost to play nice with sparse matrices
-        #     X_predict = scipy.sparse.hstack((X, ones))
 
         if (self.model_name[:16] == 'GradientBoosting' or self.model_name[:12] == 'DeepLearning' or self.model_name in ['BayesianRidge', 'LassoLars', 'OrthogonalMatchingPursuit', 'ARDRegression']) and scipy.sparse.issparse(X):
             X_predict = X.todense()
@@ -285,7 +306,27 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
         prediction = self.model.predict(X_predict)
         # Handle cases of getting a prediction for a single item.
         # It makes a cleaner interface just to get just the single prediction back, rather than a list with the prediction hidden inside.
+
+        if isinstance(prediction, np.ndarray):
+            prediction = prediction.tolist()
+            if isinstance(prediction, float) or isinstance(prediction, int) or isinstance(prediction, str):
+                return prediction
+
         if len(prediction) == 1:
             return prediction[0]
         else:
             return prediction
+
+    # transform is initially designed to be used with feature_learning
+    def transform(self, X):
+        predicted_features = self.predict(X)
+        predicted_features = list(predicted_features)
+
+        if scipy.sparse.issparse(X):
+            X = scipy.sparse.hstack([X, predicted_features], format='csr')
+        else:
+            print('Figuring out what type X is')
+            print(type(X))
+            print('If you see this message, please file a bug at https://github.com/ClimbsRocks/auto_ml')
+
+        return X

@@ -1,15 +1,15 @@
 import datetime
 import math
-import multiprocessing
 import os
 import random
 import sys
 import warnings
 
 import dill
-
-import pandas as pd
 import pathos
+
+import numpy as np
+import pandas as pd
 
 # Ultimately, we (the authors of auto_ml) are responsible for building a project that's robust against warnings.
 # The classes of warnings below are ones we've deemed acceptable. The user should be able to sit at a high level of abstraction, and not be bothered with the internals of how we're handing these things.
@@ -18,57 +18,39 @@ import pathos
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 pd.options.mode.chained_assignment = None  # default='warn'
 
-# from sklearn.model_selection import
 import scipy
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.decomposition import TruncatedSVD
 from sklearn.feature_extraction import DictVectorizer
-from sklearn.model_selection import GridSearchCV, train_test_split
+from sklearn.model_selection import GridSearchCV
 from sklearn.metrics import mean_squared_error, brier_score_loss, make_scorer, accuracy_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer
 
 
-# This is ugly, but allows auto_ml to work whether it's installed using pip, or the whole project is installed using git clone https://github.com/ClimbsRocks/auto_ml
-try:
-# from auto_ml import date_feature_engineering
-    from auto_ml import DataFrameVectorizer
-    from auto_ml import utils
-    from auto_ml import utils_data_cleaning
-    from auto_ml import utils_ensemble
-    from auto_ml import utils_feature_selection
-    from auto_ml import utils_model_training
-    from auto_ml import utils_models
-    from auto_ml import utils_scaling
-    from auto_ml import utils_scoring
-except ImportError:
-    from .. auto_ml import date_feature_engineering
-    from .. auto_ml import DataFrameVectorizer
-    from .. auto_ml import utils
-    from .. auto_ml import utils_data_cleaning
-    from .. auto_ml import utils_ensemble
-    from .. auto_ml import utils_feature_selection
-    from .. auto_ml import utils_model_training
-    from .. auto_ml import utils_models
-    from .. auto_ml import utils_scaling
-    from .. auto_ml import utils_scoring
+from auto_ml import DataFrameVectorizer
+from auto_ml import utils
+from auto_ml import utils_categorical_ensembling
+from auto_ml import utils_data_cleaning
+from auto_ml import utils_feature_selection
+from auto_ml import utils_model_training
+from auto_ml import utils_models
+from auto_ml import utils_scaling
+from auto_ml import utils_scoring
 
-
-# XGBoost can be a pain to install. It's also a super powerful and effective package.
-# So we'll make it optional here. If a user wants to install XGBoost themselves, we fully support XGBoost!
-# But, if they just want to get running out of the gate, without dealing with any installation other than what's done for them automatically, we won't force them to go through that.
-# The same logic will apply to deep learning with Keras and TensorFlow
-global xgb_installed
 xgb_installed = False
 try:
     import xgboost as xgb
     xgb_installed = True
-except NameError:
-    pass
 except ImportError:
     pass
 
-
+keras_installed = False
+try:
+    from keras.models import Model
+    keras_installed = True
+except ImportError as e:
+    keras_import_error = e
+    pass
 
 class Predictor(object):
 
@@ -94,8 +76,6 @@ class Predictor(object):
 
         self.grid_search_pipelines = []
 
-        self.is_ensemble = False
-        # Set this here for later use if this is an ensembled subpredictor
         self.name = name
 
 
@@ -131,21 +111,18 @@ class Predictor(object):
 
     # We use _construct_pipeline at both the start and end of our training.
     # At the start, it constructs the pipeline from scratch
-    # At the end, it takes FeatureSelection out after we've used it to restrict DictVectorizer
-    def _construct_pipeline(self, model_name='LogisticRegression', impute_missing_values=True, trained_pipeline=None):
+    # At the end, it takes FeatureSelection out after we've used it to restrict DictVectorizer, and adds final_model back in if we did grid search on it
+    def _construct_pipeline(self, model_name='LogisticRegression', trained_pipeline=None, final_model=None, feature_learning=False, final_model_step_name='final_model'):
 
         pipeline_list = []
 
-        if self.ensembler is not None:
-            if trained_pipeline is not None:
-                pipeline_list.append(('add_ensemble_predictions', trained_pipeline.named_steps['add_ensemble_predictions']))
-            else:
-                pipeline_list.append(('add_ensemble_predictions', utils_ensemble.AddEnsembledPredictions(ensembler=self.ensembler, type_of_estimator=self.type_of_estimator)))
 
         if self.user_input_func is not None:
             if trained_pipeline is not None:
                 pipeline_list.append(('user_func', trained_pipeline.named_steps['user_func']))
-            else:
+            elif self.transformation_pipeline is None:
+                print('Including the user_input_func in the pipeline! Please remember to return X, and not modify the length or order of X at all.')
+                print('Your function will be called as the first step of the pipeline at both training and prediction times.')
                 pipeline_list.append(('user_func', FunctionTransformer(func=self.user_input_func, pass_y=False, validate=False)))
 
         # These parts will be included no matter what.
@@ -154,7 +131,7 @@ class Predictor(object):
         else:
             pipeline_list.append(('basic_transform', utils_data_cleaning.BasicDataCleaning(column_descriptions=self.column_descriptions)))
 
-        if self.perform_feature_scaling is True or (self.compute_power >= 7 and self.perform_feature_scaling is not False):
+        if self.perform_feature_scaling is True:
             if trained_pipeline is not None:
                 pipeline_list.append(('scaler', trained_pipeline.named_steps['scaler']))
             else:
@@ -167,65 +144,42 @@ class Predictor(object):
             pipeline_list.append(('dv', DataFrameVectorizer.DataFrameVectorizer(sparse=True, sort=True, column_descriptions=self.column_descriptions)))
 
 
-        if self.perform_feature_selection == True or (self.compute_power >= 9 and self.perform_feature_selection is None):
+        if self.perform_feature_selection == True:
             if trained_pipeline is not None:
                 # This is the step we are trying to remove from the trained_pipeline, since it has already been combined with dv using dv.restrict
                 pass
             else:
-                # pipeline_list.append(('pca', TruncatedSVD()))
                 pipeline_list.append(('feature_selection', utils_feature_selection.FeatureSelectionTransformer(type_of_estimator=self.type_of_estimator, column_descriptions=self.column_descriptions, feature_selection_model='SelectFromModel') ))
 
         if trained_pipeline is not None:
-            pipeline_list.append(('final_model', trained_pipeline.named_steps['final_model']))
+            # First, check and see if we have any steps with some version of keyword matching on something like 'intermediate_model_predictions' or 'feature_learning_model' or 'ensemble_model' or something like that in them.
+            # add all of those steps
+            # then try to add in the final_model that was passed in as a param
+            # if it's none, then we've already added in the final model with our keyword matching above!
+            for step in trained_pipeline.steps:
+                step_name = step[0]
+                if step_name[-6:] == '_model':
+                    pipeline_list.append((step_name, trained_pipeline.named_steps[step_name]))
+
+            # Handling the case where we have run gscv on just the final model itself, and we now need to integrate it back into the rest of the pipeline
+            if final_model is not None:
+                pipeline_list.append((final_model_step_name, final_model))
+            # else:
+            #     pipeline_list.append(('final_model', trained_pipeline.named_steps['final_model']))
         else:
-            final_model = utils_models.get_model_from_name(model_name)
-            pipeline_list.append(('final_model', utils_model_training.FinalModelATC(model=final_model, type_of_estimator=self.type_of_estimator, ml_for_analytics=self.ml_for_analytics, name=self.name, scoring_method=self._scorer)))
-            # final_model = utils_models.get_model_from_name(model_name)
-            # pipeline_list.append(('final_model', utils_model_training.FinalModelATC(model_name=model_name, type_of_estimator=self.type_of_estimator, ml_for_analytics=self.ml_for_analytics, name=self.name)))
+            final_model = utils_models.get_model_from_name(model_name, training_params=self.training_params)
+            pipeline_list.append(('final_model', utils_model_training.FinalModelATC(model=final_model, type_of_estimator=self.type_of_estimator, ml_for_analytics=self.ml_for_analytics, name=self.name, scoring_method=self._scorer, feature_learning=feature_learning)))
 
         constructed_pipeline = Pipeline(pipeline_list)
         return constructed_pipeline
 
 
-    def _construct_pipeline_search_params(self, user_defined_model_names=None):
-
-        gs_params = {}
-
-        if self.compute_power >= 6:
-            gs_params['scaler__truncate_large_values'] = [True, False]
-
-        if user_defined_model_names is not None:
-            model_names = user_defined_model_names
-        else:
-            model_names = self._get_estimator_names()
-
-        final_model__models = []
-        for model_name in model_names:
-            final_model__models.append(utils_models.get_model_from_name(model_name))
-
-
-        # gs_params['final_model__model_name'] = model_names
-        gs_params['final_model__model'] = final_model__models
-
-        if self.compute_power >= 7:
-            gs_params['scaler__perform_feature_scaling'] = [True, False]
-
-
-        # Only optimize our feature selection methods this deeply if the user really, really wants to. This is super computationally expensive.
-        if self.compute_power >= 10:
-            # We've also built in support for 'RandomizedSparse' feature selection methods, but they don't always support sparse matrices, so we are ignoring them by default.
-            gs_params['feature_selection__feature_selection_model'] = ['SelectFromModel', 'GenericUnivariateSelect', 'KeepAll', 'RFECV'] # , 'RandomizedSparse'
-
-        return gs_params
-
-
     def _get_estimator_names(self):
         if self.type_of_estimator == 'regressor':
-            if xgb_installed:
-                base_estimators = ['XGBRegressor']
-            else:
-                base_estimators = ['GradientBoostingRegressor']
-            if self.compute_power < 7:
+
+            base_estimators = ['GradientBoostingRegressor']
+
+            if self.compare_all_models != True:
                 return base_estimators
             else:
                 base_estimators.append('RANSACRegressor')
@@ -236,11 +190,10 @@ class Predictor(object):
                 return base_estimators
 
         elif self.type_of_estimator == 'classifier':
-            if xgb_installed:
-                base_estimators = ['XGBClassifier']
-            else:
-                base_estimators = ['GradientBoostingClassifier']
-            if self.compute_power < 7:
+
+            base_estimators = ['GradientBoostingClassifier']
+
+            if self.compare_all_models != True:
                 return base_estimators
             else:
                 base_estimators.append('LogisticRegression')
@@ -250,7 +203,21 @@ class Predictor(object):
         else:
             raise('TypeError: type_of_estimator must be either "classifier" or "regressor".')
 
-    def _prepare_for_training(self, X_df):
+    def _prepare_for_training(self, X):
+
+        # We accept input as either a DataFrame, or as a list of dictionaries. Internally, we use DataFrames. So if the user gave us a list, convert it to a DataFrame here.
+        if isinstance(X, list):
+            X_df = pd.DataFrame(X)
+            del X
+        else:
+            X_df = X
+
+        # To keep this as light in memory as possible, immediately remove any columns that the user has already told us should be ignored
+        if len(self.cols_to_ignore) > 0:
+            X_df = utils.safely_drop_columns(X_df, self.cols_to_ignore)
+
+        # Having duplicate columns can really screw things up later. Remove them here, with user logging to tell them what we're doing
+        X_df = utils.drop_duplicate_columns(X_df)
 
         # If we're writing training results to file, create the new empty file name here
         if self.write_gs_param_results_to_file:
@@ -260,21 +227,13 @@ class Predictor(object):
             except:
                 pass
 
+        # Remove the output column from the dataset, and store it into the y varaible
+        y = list(X_df[self.output_column])
+        X_df = X_df.drop(self.output_column, axis=1)
+
         # Drop all rows that have an empty value for our output column
         # User logging so they can adjust if they pass in a bunch of bad values:
-        bad_rows = X_df[pd.isnull(X_df[self.output_column])]
-        if bad_rows.shape[0] > 0:
-            print('We encountered a number of missing values for this output column')
-            print('Specifically, here is the output column:')
-            print(self.output_column)
-            print('And here is the number of missing (nan, None, etc.) values for this column:')
-            print(bad_rows.shape[0])
-            print('We will remove these values, and continue with training on the cleaned dataset')
-        X_df = X_df.dropna(subset=[self.output_column])
-
-
-        # Remove the output column from the dataset, and store it into the y varaible
-        y = list(X_df.pop(self.output_column))
+        X_df, y = utils.drop_missing_y_vals(X_df, y, self.output_column)
 
         # If this is a classifier, try to turn all the y values into proper ints
         # Some classifiers play more nicely if you give them category labels as ints rather than strings, so we'll make our jobs easier here if we can.
@@ -309,273 +268,130 @@ class Predictor(object):
                 print(indices_to_delete)
                 print('These were the bad values')
                 print(bad_vals)
-                # indices_to_delete = set(indices_to_delete)
                 X_df = X_df.drop(X_df.index(indices_to_delete))
-                # X_df = [row for idx, row in enumerate(X_df) if idx not in indices_to_delete]
 
         return X_df, y
 
 
-    def _consolidate_feature_selection_steps(self, trained_pipeline):
+    def _consolidate_pipeline(self, transformation_pipeline, final_model=None):
         # First, restrict our DictVectorizer or DataFrameVectorizer
         # This goes through and has DV only output the items that have passed our support mask
         # This has a number of benefits: speeds up computation, reduces memory usage, and combines several transforms into a single, easy step
         # It also significantly reduces the size of dv.vocabulary_ which can get quite large
 
-        dv = trained_pipeline.named_steps['dv']
+        dv = transformation_pipeline.named_steps['dv']
 
-        # If we do not have feature selection in the pipeline, just return the pipeline as is
         try:
-            feature_selection = trained_pipeline.named_steps['feature_selection']
+            feature_selection = transformation_pipeline.named_steps['feature_selection']
+            feature_selection_mask = feature_selection.support_mask
+            dv.restrict(feature_selection_mask)
         except KeyError:
-            return trained_pipeline
-        feature_selection_mask = feature_selection.support_mask
-        dv.restrict(feature_selection_mask)
+            pass
 
         # We have overloaded our _construct_pipeline method to work both to create a new pipeline from scratch at the start of training, and to go through a trained pipeline in exactly the same order and steps to take a dedicated FeatureSelection model out of an already trained pipeline
         # In this way, we ensure that we only have to maintain a single centralized piece of logic for the correct order a pipeline should follow
-        trained_pipeline_without_feature_selection = self._construct_pipeline(trained_pipeline=trained_pipeline)
+        trained_pipeline_without_feature_selection = self._construct_pipeline(trained_pipeline=transformation_pipeline, final_model=final_model)
 
         return trained_pipeline_without_feature_selection
 
-
-    def train_ensemble(self, data, ensemble_training_list, X_test=None, y_test=None, ensemble_method='median', data_for_final_ensembling=None, find_best_method=False, verbose=2, include_original_X=True, scoring=None):
-
-        self.scoring = scoring
-
-        if y_test is not None:
-            y_test = list(y_test)
-        self.ensemble_predictors = []
-
-        self.is_ensemble = True
-        self.ml_for_analytics = True
-
-        if self.type_of_estimator == 'classifier':
-            scoring = utils_scoring.ClassificationScorer(self.scoring)
-            self._scorer = scoring
-        else:
-            scoring = utils_scoring.RegressionScorer(self.scoring)
-            self._scorer = scoring
-
-        # Make it optional for the person to pass in type_of_estimator
-        for training_params in ensemble_training_list:
-            if training_params.get('type_of_estimator', None) is None:
-                training_params['type_of_estimator'] = self.type_of_estimator
-            if training_params.get('scoring', None) is None:
-                training_params['scoring'] = self.scoring
-
-        # ################################
-        # If we're using machine learning to assemble our final ensemble, and we don't have data for it from the user, split out data here
-        # ################################
-        if ensemble_method in ['machine learning', 'ml', 'machine_learning'] and data_for_final_ensembling is None:
-
-
-
-            # Just grab the last 20% of the dataset in the order it was given to us
-            ensemble_idx = int(0.7 * len(data))
-            data_for_final_ensembling = data[ensemble_idx:]
-            data = data[:ensemble_idx]
-
-
-
-        # ################################
-        # Train one subpredictor, with logging, and only a subset of the data as chosen by the user
-        # ################################
-        def train_one_ensemble_subpredictor(training_params):
-
-            print('\n\n************************')
-            print('Training a new subpredictor for the ensemble!')
-            name = training_params.pop('name')
-            print('The name you gave for this estimator is:')
-            print(name)
-            print('\n\n')
-            type_of_estimator = training_params.pop('type_of_estimator')
-            col_descs = training_params.pop('column_descriptions')
-            ml_predictor = Predictor(type_of_estimator, col_descs, name=name)
-
-            this_rounds_data = data
-
-            data_selection_func = training_params.pop('data_selection_func', None)
-            if callable(data_selection_func):
-                try:
-                    # TODO: figure out how to see if this function is expecting to take in the name argument or not
-                    this_rounds_data = data_selection_func(data, name)
-                except TypeError:
-                    this_rounds_data = data_selection_func(data)
-            else:
-                this_rounds_data = data
-
-
-            training_params['raw_training_data'] = this_rounds_data
-
-            ml_predictor.train(**training_params)
-
-            return ml_predictor
-
-            # self.ensemble_predictors.append(ml_predictor)
-
-
-        # ################################
-        # Train subpredictors in parallel
-        # ################################
-        pool = pathos.multiprocessing.ProcessPool()
-
-        # Since we may have already closed the pool, try to restart it
-        try:
-            pool.restart()
-        except AssertionError as e:
-            pass
-        trained_ensemble_predictors = pool.map(train_one_ensemble_subpredictor, ensemble_training_list, chunksize=100)
-        trained_ensemble_predictors = list(trained_ensemble_predictors)
-
-        # self.ensemble_predictors = [predictor.trained_pipeline for predictor in self.ensemble_predictors]
-        # Once we have gotten all we need from the pool, close it so it's not taking up unnecessary memory
-        pool.close()
-        try:
-            pool.join()
-        except AssertionError:
-            pass
-
-        # ################################
-        # Print scoring information for each trained subpredictor
-        # ################################
-        if X_test is not None and verbose >= 3:
-            print('Scoring each of the trained subpredictors on the holdout data')
-
-            def score_predictor(predictor, X_test, y_test):
-                try:
-                    print(predictor.name)
-                except AttributeError:
-                    pass
-
-
-                predictor.score(X_test, y_test)
-
-            pool = pathos.multiprocessing.ProcessPool()
-
-            # Since we may have already closed the pool, try to restart it
-            try:
-                pool.restart()
-            except AssertionError as e:
-                pass
-            pool.map(lambda predictor: score_predictor(predictor, X_test, y_test), trained_ensemble_predictors, chunksize=100)
-            # pool.map(lambda predictor: score_predictor(predictor, X_test, y_test), self.ensemble_predictors, chunksize=100)
-            # Once we have gotten all we need from the pool, close it so it's not taking up unnecessary memory
-            pool.close()
-            try:
-                pool.join()
-            except AssertionError:
-                pass
-
-        # Now that we've handled scoring (for which we will want the full ml_predictor objects with name and advanced_scoring, etc.), only grab the trained pipelines, which are much, much smaller objects
-        for predictor in trained_ensemble_predictors:
-            trained_pipeline = predictor.trained_pipeline
-            # trained_pipeline.named_steps['final_model']['name'] = predictor.name
-            self.ensemble_predictors.append(trained_pipeline)
-
-        # ################################
-        # Ensemble together our trained subpredictors, either using simple averaging, or training a new machine learning model to pick from amongst them
-        # ################################
-
-        if ensemble_method in ['machine learning', 'ml', 'machine_learning']:
-            ensembler = utils_ensemble.Ensemble(ensemble_predictors=self.ensemble_predictors, type_of_estimator=self.type_of_estimator, method=ensemble_method)
-
-
-            ml_predictor = Predictor(type_of_estimator=self.type_of_estimator, column_descriptions=self.column_descriptions, name=self.name)
-
-            print('\n\n\n')
-            print('We have trained up a bunch of individual estimators on this problem. Now it is time to train one final estimator that will ensemble all these predictions together for us')
-            print('Using machine learning to ensemble together a bunch of trained estimators!')
-            data_for_final_ensembling = data_for_final_ensembling.reset_index()
-            if self.type_of_estimator == 'regressor':
-                model_names = ['RandomForestRegressor', 'LinearRegression', 'ExtraTreesRegressor', 'Ridge', 'GradientBoostingRegressor', 'AdaBoostRegressor', 'Lasso', 'ElasticNet', 'LassoLars', 'OrthogonalMatchingPursuit', 'BayesianRidge', 'SGDRegressor']
-                if xgb_installed:
-                    model_names.append('XGBRegressor')
-            else:
-                model_names = ['RandomForestClassifier', 'GradientBoostingClassifier', 'RidgeClassifier', 'LogisticRegression']
-                if xgb_installed:
-                    model_names.append('XGBClassifier')
-                # model_names = ['LogisticRegression']
-            ml_predictor.train(raw_training_data=data_for_final_ensembling, ensembler=ensembler, perform_feature_selection=False, model_names=model_names, _include_original_X=include_original_X, scoring=self.scoring)
-
-
-            # predictions_on_ensemble_data = ensembler._get_all_predictions(data_for_final_ensembling)
-            # data_for_final_ensembling = pd.concat([data_for_final_ensembling, predictions_on_ensemble_data], axis=1)
-
-            self.trained_pipeline = ml_predictor.trained_pipeline
-
-            if find_best_method == True:
-                ensembler.find_best_ensemble_method(df=X_test, actuals=y_test)
-
-        else:
-
-            # Create an instance of an Ensemble object that will get predictions from all the trained subpredictors
-            self.trained_pipeline = utils_ensemble.Ensemble(ensemble_predictors=self.ensemble_predictors, type_of_estimator=self.type_of_estimator, method=ensemble_method)
-
-            if find_best_method == True:
-                self.trained_pipeline.find_best_ensemble_method(df=X_test, actuals=y_test)
-
-
-
-
-    def train(self, raw_training_data, user_input_func=None, optimize_entire_pipeline=False, optimize_final_model=None, write_gs_param_results_to_file=True, perform_feature_selection=None, verbose=True, X_test=None, y_test=None, print_training_summary_to_viewer=True, ml_for_analytics=True, only_analytics=False, compute_power=3, take_log_of_y=None, model_names=None, perform_feature_scaling=True, ensembler=None, calibrate_final_model=False, _include_original_X=False, _scorer=None, scoring=None, verify_features=False):
+    def set_params_and_defaults(self, X_df, user_input_func=None, optimize_final_model=None, write_gs_param_results_to_file=True, perform_feature_selection=None, verbose=True, X_test=None, y_test=None, ml_for_analytics=True, take_log_of_y=None, model_names=None, perform_feature_scaling=True, calibrate_final_model=False, _scorer=None, scoring=None, verify_features=False, training_params=None, grid_search_params=None, compare_all_models=False, cv=2, feature_learning=False, fl_data=None):
 
         self.user_input_func = user_input_func
         self.optimize_final_model = optimize_final_model
-        self.optimize_entire_pipeline = optimize_entire_pipeline
         self.write_gs_param_results_to_file = write_gs_param_results_to_file
-        self.compute_power = compute_power
         self.ml_for_analytics = ml_for_analytics
-        self.only_analytics = only_analytics
         self.X_test = X_test
         self.y_test = y_test
-        self.print_training_summary_to_viewer = print_training_summary_to_viewer
         if self.type_of_estimator == 'regressor':
             self.take_log_of_y = take_log_of_y
-        self.model_names = model_names
+
+        # We expect model_names to be a list of strings
+        if isinstance(model_names, str):
+            # If the user passes in a single string, put it in a list
+            self.model_names = [model_names]
+        else:
+            self.model_names = model_names
+
         self.perform_feature_scaling = perform_feature_scaling
-        self.ensembler = ensembler
         self.calibrate_final_model = calibrate_final_model
         self.scoring = scoring
-
-        if verbose:
-            print('Welcome to auto_ml! We\'re about to go through and make sense of your data using machine learning')
-
-        # We accept input as either a DataFrame, or as a list of dictionaries. Internally, we use DataFrames. So if the user gave us a list, convert it to a DataFrame here.
-        if isinstance(raw_training_data, list):
-            X_df = pd.DataFrame(raw_training_data)
-            del raw_training_data
-        else:
-            X_df = raw_training_data
-
-        # Unless the user has told us to, don't perform feature selection unless we have a pretty decent amount of data
-        if perform_feature_selection is None and self.compute_power < 9:
-            if len(X_df.columns) < 50 or len(X_df) < 100000:
-                perform_feature_selection = False
-            else:
-                perform_feature_selection = True
+        self.training_params = training_params
+        self.user_gs_params = grid_search_params
+        if self.user_gs_params is not None:
+            self.optimize_final_model = True
+        self.compare_all_models = compare_all_models
+        self.cv = cv
 
         self.perform_feature_selection = perform_feature_selection
 
-        # To keep this as light in memory as possible, immediately remove any columns that the user has already told us should be ignored
-        if len(self.cols_to_ignore) > 0:
-            X_df = utils.safely_drop_columns(X_df, self.cols_to_ignore)
+        self.feature_learning = feature_learning
+        if self.feature_learning == True:
+            if fl_data is None:
+                print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+                print('Saw that feature_learning is True, but there is no data passed in for fl_data, which is needed to train the feature_learning estimator')
+                warnings.warn('Please pass in fl_data which is the dataset that will be used to train the feature_learning estimator.')
+                print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+                raise ValueError('The data passed in for fl_data is missing')
+            self.fl_data = fl_data
 
-        X_df, y = self._prepare_for_training(X_df)
-        self.X_df = X_df
-        self.y = y
+            if self.perform_feature_scaling == False:
+                print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+                print('Heard that we should not perform feature_scaling, but we should perform feature_learning. Note that feature_scaling is typically useful for deep learning, which is what we use for feature_learning. If you want a little more model accuracy from the feature_learning step, consider not passing in perform_feature_scaling=False')
+                warnings.warn('Consider allowing auto_ml to perform_feature_scaling in conjunction with feature_learning')
 
+            if self.perform_feature_selection == True:
+                print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+                print('We are not currently supporting perform_feature_selection with this release of feature_learning. We will override perform_feature_selection to False and continue with training.')
+                warnigns.warn('perform_feature_selection=True is not currently supported with feature_learning.')
+            self.perform_feature_selection = False
+
+            if (isinstance(X_df, pd.DataFrame) and X_df.equals(fl_data)) or (isinstance(X_df, list) and X_df == fl_data):
+                print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+                print('You must pass in different data for fl_data and your training data. This is true both philosophically (you are much more likely to overfit if fl_data == training_data), and logistically (we remove the y column from both datasets, which will throw an error)')
+                print('If you are looking for a quick and easy way of splitting the data, use scikit-learn\'s train_test_split: df_train, fl_data = train_test_split(df_train, test_size=0.33)  ')
+                print('Or, if you insist on using the same dataset for both, you must at least copy it:')
+                print('ml_predictor.train(df_train, feature_learning=True, fl_data=df_train.copy())')
+                warnings.warn('Your fl_data and df_train must be different datasets. Use train_test_split, or at least copy the data for your fl_data')
+
+            if keras_installed != True:
+                print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+                print('feature_learning requires Keras to be installed.')
+                print('When we tried to import Model from Keras, we ran into the following error:')
+                print(keras_import_error)
+                print('Raising that error now, since feature_learning will not run without Keras')
+                raise(keras_import_error)
+
+        self.transformation_pipeline = None
+
+
+
+    # We are taking in scoring here to deal with the unknown behavior around multilabel classification below
+    def _clean_data_and_prepare_for_training(self, data, scoring):
+
+        X_df, y = self._prepare_for_training(data)
 
         if self.take_log_of_y:
             y = [math.log(val) for val in y]
             self.took_log_of_y = True
 
-        if model_names is not None:
-            estimator_names = model_names
+        self.X_df = X_df
+        self.y = y
+
+        # Unless the user has told us to, don't perform feature selection unless we have a pretty decent amount of data
+        if self.perform_feature_selection is None:
+            if len(X_df.columns) < 50 or len(X_df) < 100000:
+                self.perform_feature_selection = False
+            else:
+                self.perform_feature_selection = True
+
+        # If the user passed in a valid value for model_names (not None, and not a list where the only thing is None)
+        if self.model_names is not None and not (len(self.model_names) == 1 and self.model_names[0] is None):
+            estimator_names = self.model_names
         else:
             estimator_names = self._get_estimator_names()
 
 
+        # TODO: we're not using ClassificationScorer for multilabel classification. Why?
         if self.type_of_estimator == 'classifier':
             if len(set(y)) > 2 and self.scoring is None:
                 self.scoring = 'accuracy_score'
@@ -587,91 +403,83 @@ class Predictor(object):
             self._scorer = scoring
 
 
-        self.perform_grid_search_by_model_names(estimator_names, self._scorer, X_df, y)
+        return X_df, y, estimator_names
 
-        # If we ran GridSearchCV, we will have to pick the best model
-        # If we did not, the best trained pipeline will already be saved in self.trained_pipeline
-        if len(self.grid_search_pipelines) > 1:
-            # Once we have trained all the pipelines, select the best one based on it's performance on (top priority first):
-            # 1. Holdout data
-            # 2. CV data
 
-            # First, sort all of the tuples that hold our scores in their first position(s), and our actual trained pipeline in their final position
-            # Since a more positive score is better, we want to make sure that the first item in our sorted list is the highest score, thus, reverse=True
-            sorted_gs_pipeline_results = sorted(self.grid_search_pipelines, key=lambda x: x[0], reverse=True)
+    def fit_feature_learning_and_transformation_pipeline(self, X_df, fl_data, y):
+        fl_data_cleaned, fl_y, _ = self._clean_data_and_prepare_for_training(fl_data, self.scoring)
 
-            # Next, grab the thing at position 0 in our sorted list, which is itself a list of the scores(s), and the pipeline itself
-            best_result_list = sorted_gs_pipeline_results[0]
-            # Our best grid search result is the thing at the end of that list.
-            best_trained_gs = best_result_list[-1]
-            # And the pipeline is the best estimator within that grid search object.
-            try:
-                self.trained_pipeline = best_trained_gs.best_estimator_
-            except:
-                # We are also supporting the use case of the user training multiple model types, without optimzing any of them (so no GridSearchCV), but using X_test and y_test to determine the best model
-                # In that case, the thing at the end of the best_result_list will be the trained pipeline we're interested in
-                self.trained_pipeline = best_trained_gs
+        len_X_df = len(X_df)
+        combined_training_data = pd.concat([X_df, fl_data_cleaned], axis=0)
+        combined_y = y + fl_y
 
-        # DictVectorizer will now perform DictVectorizer and FeatureSelection in a very efficient combination of the two steps.
-        self.trained_pipeline = self._consolidate_feature_selection_steps(self.trained_pipeline)
+        if self.type_of_estimator == 'classifier':
+            fl_estimator_names = ['DeepLearningClassifier']
+        elif self.type_of_estimator == 'regressor':
+            fl_estimator_names = ['DeepLearningRegressor']
+
+        # For performance reasons, I believe it is critical to only have one transformation pipeline, no matter how many estimators we eventually build on top. Getting predictions from a trained estimator is typically super quick. We can easily get predictions from 10 trained models in a production-ready amount of time.But the transformation pipeline is not so quick that we can duplicate it 10 times.
+        combined_transformed_data = self.fit_transformation_pipeline(combined_training_data, combined_y, fl_estimator_names[0])
+
+        fl_indices = [i for i in range(len_X_df, combined_transformed_data.shape[0])]
+        fl_data_transformed = combined_transformed_data[fl_indices]
+
+        # fit a train_final_estimator
+        feature_learning_step = self.train_ml_estimator(fl_estimator_names, self._scorer, fl_data_transformed, fl_y, feature_learning=True)
+
+        # Split off the final layer/find a way to get the output from the penultimate layer
+        fl_model = feature_learning_step.model
+
+        feature_output_model = Model(inputs=fl_model.model.input, outputs=fl_model.model.get_layer('penultimate_layer').output)
+        feature_learning_step.model = feature_output_model
+
+        # Add those to the list in our DV so we know what to do with them for analytics purposes
+        feature_learning_names = []
+        for idx in range(10):
+            feature_learning_names.append('feature_learning_' + str(idx + 1))
+
+        self.transformation_pipeline.named_steps['dv'].feature_names_ += feature_learning_names
+
+        # add the estimator to the end of our transformation pipeline
+        self.transformation_pipeline = self._construct_pipeline(trained_pipeline=self.transformation_pipeline, final_model=feature_learning_step, final_model_step_name='feature_learning_model')
+
+        # Pass our already-transformed X_df just through the feature_learning_step.transform. This avoids duplicate computationn
+        indices = [i for i in range(len_X_df)]
+        X_df_transformed = combined_transformed_data[indices]
+        X_df = feature_learning_step.transform(X_df_transformed)
+
+        return X_df
+
+
+    def train(self, raw_training_data, user_input_func=None, optimize_final_model=None, write_gs_param_results_to_file=True, perform_feature_selection=None, verbose=True, X_test=None, y_test=None, ml_for_analytics=True, take_log_of_y=None, model_names=None, perform_feature_scaling=True, calibrate_final_model=False, _scorer=None, scoring=None, verify_features=False, training_params=None, grid_search_params=None, compare_all_models=False, cv=2, feature_learning=False, fl_data=None):
+
+        self.set_params_and_defaults(raw_training_data, user_input_func=user_input_func, optimize_final_model=optimize_final_model, write_gs_param_results_to_file=write_gs_param_results_to_file, perform_feature_selection=perform_feature_selection, verbose=verbose, X_test=X_test, y_test=y_test, ml_for_analytics=ml_for_analytics, take_log_of_y=take_log_of_y, model_names=model_names, perform_feature_scaling=perform_feature_scaling, calibrate_final_model=calibrate_final_model, _scorer=_scorer, scoring=scoring, verify_features=verify_features, training_params=training_params, grid_search_params=grid_search_params, compare_all_models=compare_all_models, cv=cv, feature_learning=feature_learning, fl_data=fl_data)
+
+        if verbose:
+            print('Welcome to auto_ml! We\'re about to go through and make sense of your data using machine learning, and give you a production-ready pipeline to get predictions with.\n')
+            print('If you have any issues, or new feature ideas, let us know at https://github.com/ClimbsRocks/auto_ml')
+
+
+        X_df, y, estimator_names = self._clean_data_and_prepare_for_training(raw_training_data, scoring)
+
+        if self.feature_learning == True:
+            X_df = self.fit_feature_learning_and_transformation_pipeline(X_df, fl_data, y)
+        else:
+            X_df = self.fit_transformation_pipeline(X_df, y, estimator_names[0])
+
+        # This is our main logic for how we train the final model
+        self.trained_final_model = self.train_ml_estimator(estimator_names, self._scorer, X_df, y)
+
+        # Calibrate the probability predictions from our final model
+        if self.calibrate_final_model is True:
+            self.trained_final_model.model = self._calibrate_final_model(self.trained_final_model.model, X_test, y_test)
+
+        self.trained_pipeline = self._consolidate_pipeline(self.transformation_pipeline, self.trained_final_model)
 
         # verify_features is not enabled by default. It adds a significant amount to the file size of the saved pipelines.
         # If you are interested in submitting a PR to reduce the saved file size, there are definitely some optimizations you can make!
         if verify_features == True:
-            # Save the features we used for training to our FinalModelATC instance.
-            # This lets us provide useful information to the user when they call .predict(data, verbose=True)
-            trained_feature_names = self._get_trained_feature_names()
-            # print('trained_feature_names')
-            # print(trained_feature_names)
-            self.trained_pipeline.set_params(final_model__training_features=trained_feature_names)
-            # We will need to know which columns are categorical/ignored/nlp when verifying features
-            self.trained_pipeline.set_params(final_model__column_descriptions=self.column_descriptions)
-            # self.trained_pipeline.named_steps['final_model']['training_features'] = trained_feature_names
-
-
-        # Calibrate the probability predictions from our final model
-        if self.calibrate_final_model is True and X_test is not None and y_test is not None:
-            print('Now calibrating the final model so the probability predictions line up with the observed probabilities in the X_test and y_test datasets you passed in.')
-            print('Note: the validation scores printed above are truly validation scores: they were scored before the model was calibrated to this data.')
-            print('However, now that we are calibrating on the X_test and y_test data you gave us, it is no longer accurate to call this data validation data, since the model is being calibrated to it. As such, you must now report a validation score on a different dataset, or report the validation score used above before the model was calibrated to X_test and y_test. ')
-
-            trained_model = self.trained_pipeline.named_steps['final_model'].model
-
-            if len(X_test) < 1000:
-                calibration_method = 'sigmoid'
-            else:
-                calibration_method = 'isotonic'
-
-            calibrated_classifier = CalibratedClassifierCV(trained_model, method=calibration_method, cv='prefit')
-
-            # We need to make sure X_test has been processed the exact same way y_test has.
-            # So grab all the steps of the pipeline up to, but not including, the final_model
-            # and run X_test through that transformer pipeline
-            self.trained_transformer_pipeline = self.trained_pipeline
-            transformer_pipeline = []
-            for step in self.trained_transformer_pipeline.steps:
-                if step[0] != 'final_model':
-                    transformer_pipeline.append(step)
-
-            self.trained_transformer_pipeline = Pipeline(transformer_pipeline)
-
-            X_test = self.trained_transformer_pipeline.transform(X_test)
-
-            try:
-                calibrated_classifier = calibrated_classifier.fit(X_test, y_test)
-            except TypeError as e:
-                if scipy.sparse.issparse(X_test):
-                    X_test = X_test.toarray()
-
-                    calibrated_classifier = calibrated_classifier.fit(X_test, y_test)
-                else:
-                    raise(e)
-
-
-            # Now insert the calibrated model back into our final_model step
-            self.trained_pipeline.named_steps['final_model'].model = calibrated_classifier
-
-
+            self._prepare_for_verify_features()
 
         # Delete values that we no longer need that are just taking up space.
         del self.X_test
@@ -680,154 +488,399 @@ class Predictor(object):
         del X_df
 
 
-    # This is broken out into it's own function for each estimator on purpose
+    def _prepare_for_verify_features(self):
+        # Save the features we used for training to our FinalModelATC instance.
+        # This lets us provide useful information to the user when they call .predict(data, verbose=True)
+        trained_feature_names = self._get_trained_feature_names()
+        self.trained_pipeline.set_params(final_model__training_features=trained_feature_names)
+        # We will need to know which columns are categorical/ignored/nlp when verifying features
+        self.trained_pipeline.set_params(final_model__column_descriptions=self.column_descriptions)
+
+
+    def _calibrate_final_model(self, trained_model, X_test, y_test):
+
+        if X_test is None or y_test is None:
+            print('X_test or y_test was not present while trying to calibrate the final model')
+            print('Please pass in both X_test and y_test to calibrate the final model')
+            print('Skipping model calibration')
+            return trained_model
+
+        print('Now calibrating the final model so the probability predictions line up with the observed probabilities in the X_test and y_test datasets you passed in.')
+        print('Note: the validation scores printed above are truly validation scores: they were scored before the model was calibrated to this data.')
+        print('However, now that we are calibrating on the X_test and y_test data you gave us, it is no longer accurate to call this data validation data, since the model is being calibrated to it. As such, you must now report a validation score on a different dataset, or report the validation score used above before the model was calibrated to X_test and y_test. ')
+
+        if len(X_test) < 1000:
+            calibration_method = 'sigmoid'
+        else:
+            calibration_method = 'isotonic'
+
+        calibrated_classifier = CalibratedClassifierCV(trained_model, method=calibration_method, cv='prefit')
+
+        # We need to make sure X_test has been processed the exact same way y_test has.
+        X_test_processed = self.transformation_pipeline.transform(X_test)
+
+        try:
+            calibrated_classifier = calibrated_classifier.fit(X_test_processed, y_test)
+        except TypeError as e:
+            if scipy.sparse.issparse(X_test_processed):
+                X_test_processed = X_test_processed.toarray()
+
+                calibrated_classifier = calibrated_classifier.fit(X_test_processed, y_test)
+            else:
+                raise(e)
+
+        return calibrated_classifier
+
+
+    def fit_single_pipeline(self, X_df, y, model_name, feature_learning=False):
+
+        full_pipeline = self._construct_pipeline(model_name=model_name, feature_learning=feature_learning)
+        ppl = full_pipeline.named_steps['final_model']
+        if self.verbose:
+            print('\n\n********************************************************************************************')
+            if self.name is not None:
+                print(self.name)
+            print('About to fit the pipeline for the model ' + model_name + ' to predict ' + self.output_column)
+            print('Started at:')
+            start_time = datetime.datetime.now().replace(microsecond=0)
+            print(start_time)
+
+        ppl.fit(X_df, y)
+
+        if self.verbose:
+            print('Finished training the pipeline!')
+            print('Total training time:')
+            print(datetime.datetime.now().replace(microsecond=0) - start_time)
+
+        self.trained_final_model = ppl
+        self.print_results(model_name)
+
+        return ppl
+
+
+    # We have broken our model training into separate components. The first component is always going to be fitting a transformation pipeline. The great part about separating the feature transformation step is that now we can perform other work on the final step, and not have to repeat the sometimes time-consuming step of the transformation pipeline.
+    # NOTE: if included, we will be fitting a feature selection step here. This can get messy later on with ensembling if we end up training on different y values.
+    def fit_transformation_pipeline(self, X_df, y, model_name):
+        ppl = self._construct_pipeline(model_name=model_name)
+        ppl.steps.pop()
+
+        # We are intentionally overwriting X_df here to try to save some memory space
+        X_df = ppl.fit_transform(X_df, y)
+
+        self.transformation_pipeline = ppl
+
+        return X_df
+
+
+    def print_results(self, model_name):
+        if self.ml_for_analytics and model_name in ('LogisticRegression', 'RidgeClassifier', 'LinearRegression', 'Ridge'):
+            self._print_ml_analytics_results_linear_model()
+
+        elif self.ml_for_analytics and model_name in ['RandomForestClassifier', 'RandomForestRegressor', 'XGBClassifier', 'XGBRegressor', 'GradientBoostingRegressor', 'GradientBoostingClassifier', 'LGBMRegressor', 'LGBMClassifier']:
+            self._print_ml_analytics_results_random_forest()
+
+
+    def fit_grid_search(self, X_df, y, gs_params, feature_learning=False):
+
+        model = gs_params['model']
+        # Sometimes we're optimizing just one model, sometimes we're comparing a bunch of non-optimized models.
+        if isinstance(model, list):
+            model = model[0]
+
+        if len(gs_params['model']) == 1:
+            # Delete this so it doesn't show up in our logging
+            del gs_params['model']
+        model_name = utils_models.get_name_from_model(model)
+
+        full_pipeline = self._construct_pipeline(model_name=model_name, feature_learning=feature_learning)
+        ppl = full_pipeline.named_steps['final_model']
+
+        if self.verbose:
+            grid_search_verbose = 5
+        else:
+            grid_search_verbose = 0
+
+        n_jobs = -1
+        if os.environ.get('is_test_suite', 0) == 'True':
+            n_jobs = 1
+
+        gs = GridSearchCV(
+            # Fit on the pipeline.
+            ppl,
+            # Two splits of cross-validation, by default
+            cv=self.cv,
+            param_grid=gs_params,
+            # Train across all cores.
+            n_jobs=n_jobs,
+            # Be verbose (lots of printing).
+            verbose=grid_search_verbose,
+            # Print warnings when we fail to fit a given combination of parameters, but do not raise an error.
+            # Set the score on this partition to some very negative number, so that we do not choose this estimator.
+            error_score=-1000000000,
+            scoring=self._scorer.score,
+            # Don't allocate memory for all jobs upfront. Instead, only allocate enough memory to handle the current jobs plus an additional 50%
+            pre_dispatch='1.5*n_jobs'
+        )
+
+        if self.verbose:
+            print('\n\n********************************************************************************************')
+            if self.optimize_final_model == True:
+                print('About to run GridSearchCV on the pipeline for the model ' + model_name + ' to predict ' + self.output_column)
+            else:
+                print('About to run GridSearchCV on the pipeline for several models to predict ' + self.output_column)
+                # Note that we will only report analytics results on the final model that ultimately gets selected, and trained on the entire dataset
+
+        gs.fit(X_df, y)
+
+        if self.write_gs_param_results_to_file:
+            utils.write_gs_param_results_to_file(gs, self.gs_param_file_name)
+
+        if self.verbose:
+            self.print_training_summary(gs)
+
+        self.trained_final_model = gs.best_estimator_
+        if 'model' in gs.best_params_:
+            model_name = gs.best_params_['model']
+            self.print_results(model_name)
+
+        return gs
+
+
+    def create_gs_params(self, model_name):
+        grid_search_params = {}
+
+        raw_search_params = utils_models.get_search_params(model_name)
+
+        for param_name, param_list in raw_search_params.items():
+            # We need to tell GS where to set these params. In our case, it is on the "final_model" object, and specifically the "model" attribute on that object
+            grid_search_params['model__' + param_name] = param_list
+
+        # Overwrite with the user-provided gs_params if they're provided
+        if self.user_gs_params is not None:
+            print('Using the grid_search_params you passed in:')
+            print(self.user_gs_params)
+            grid_search_params.update(self.user_gs_params)
+            print('Here is our final list of grid_search_params:')
+            print(grid_search_params)
+            print('Please note that if you want to set the grid search params for the final model specifically, they need to be prefixed with: "model__"')
+
+        return grid_search_params
+
     # When we go to perform hyperparameter optimization, the hyperparameters for a GradientBoosting model will not at all align with the hyperparameters for an SVM. Doing all of that in one giant GSCV would throw errors. So we train each model in it's own grid search.
-    # This also lets us test on X_test and y_test for each model
-    def perform_grid_search_by_model_names(self, estimator_names, scoring, X_df, y):
+    def train_ml_estimator(self, estimator_names, scoring, X_df, y, feature_learning=False):
 
-        for model_name in estimator_names:
+        # Use Case 1: Super straightforward: just train a single, non-optimized model
+        if len(estimator_names) == 1 and self.optimize_final_model != True:
+            trained_final_model = self.fit_single_pipeline(X_df, y, estimator_names[0], feature_learning=feature_learning)
 
-            ppl = self._construct_pipeline(model_name=model_name)
+        # Use Case 2: Compare a bunch of models, but don't optimize any of them
+        elif len(estimator_names) > 1 and self.optimize_final_model != True:
+            grid_search_params = {}
 
-            self.grid_search_params = self._construct_pipeline_search_params(user_defined_model_names=estimator_names)
+            final_model_models = map(utils_models.get_model_from_name, estimator_names)
 
-            # self.grid_search_params['final_model__model_name'] = [model_name]
+            # We have to use GSCV here to choose between the different models
+            grid_search_params['model'] = list(final_model_models)
 
-            if self.optimize_final_model is True or (self.compute_power >= 5 and self.optimize_final_model is not False):
-                raw_search_params = utils_models.get_search_params(model_name)
-                for param_name, param_list in raw_search_params.items():
-                    self.grid_search_params['final_model__model__' + param_name] = param_list
+            self.grid_search_params = grid_search_params
 
-            if self.verbose:
-                grid_search_verbose = 5
-            else:
-                grid_search_verbose = 0
+            gscv_results = self.fit_grid_search(X_df, y, grid_search_params)
 
-            # Only fit GridSearchCV if we actually have hyperparameters to optimize.
-            # Oftentimes, we'll just want to train a pipeline using all the default values, or using the user-provided values.
-            # In those cases, fitting GSCV is unnecessarily computationally expensive.
-            self.fit_grid_search = False
-            for key, val in self.grid_search_params.items():
+            trained_final_model = gscv_results.best_estimator_
 
-                # if it is a list, and has a length > 1, we will want to fit grid search
-                if hasattr(val, '__len__') and (not isinstance(val, str)) and len(val) > 1 and key != 'final_model__model':
-                    self.fit_grid_search = True
+        # Use Case 3: One model, and optimize it!
+        # Use Case 4: Many models, and optimize them!
+        elif self.optimize_final_model == True:
+            # Use Cases 3 & 4 are clearly highly related
 
-            # Here is where we will want to build in the logic for handling cases of no X_test, and no GSCV, but multiple models. Just add them to the GSCV params, and run GSCV, and we should be set.
-            self.continue_after_single_gscv = False
+            all_gs_results = []
 
-            if self.fit_grid_search == False and (self.X_test is None and self.y_test is None) and len(estimator_names) > 1:
+            # If we just have one model, this will obviously be a very simple loop :)
+            for model_name in estimator_names:
 
-                final_model_models = map(lambda estimator_name: utils_models.get_model_from_name(estimator_name), estimator_names)
-                self.grid_search_params['final_model__model'] = list(final_model_models)
-                self.fit_grid_search = True
-                self.continue_after_single_gscv = True
+                grid_search_params = self.create_gs_params(model_name)
+                # Adding model name to gs params just to help with logging
+                grid_search_params['model'] = [utils_models.get_model_from_name(model_name)]
+                # grid_search_params['model_name'] = model_name
+                self.grid_search_params = grid_search_params
 
-            if self.fit_grid_search == True:
+                gscv_results = self.fit_grid_search(X_df, y, grid_search_params, feature_learning=feature_learning)
 
-                gs = GridSearchCV(
-                    # Fit on the pipeline.
-                    ppl,
-                    cv=2,
-                    param_grid=self.grid_search_params,
-                    # Train across all cores.
-                    n_jobs=-1,
-                    # Be verbose (lots of printing).
-                    verbose=grid_search_verbose,
-                    # Print warnings when we fail to fit a given combination of parameters, but do not raise an error.
-                    # Set the score on this partition to some very negative number, so that we do not choose this estimator.
-                    error_score=-1000000000,
-                    scoring=scoring.score,
-                    # ,pre_dispatch='1*n_jobs'
-                )
+                all_gs_results.append(gscv_results)
 
-                if self.verbose:
-                    print('\n\n********************************************************************************************')
-                    if self.continue_after_single_gscv:
-                        print('About to run GridSearchCV on the pipeline for several models to predict ' + self.output_column)
-                    else:
-                        print('About to run GridSearchCV on the pipeline for the model ' + model_name + ' to predict ' + self.output_column)
+            # Grab the first one by default
+            self.trained_final_model = all_gs_results[0].best_estimator_
+            trained_final_model = all_gs_results[0].best_estimator_
+            best_score = all_gs_results[0].best_score_
 
-                gs.fit(X_df, y)
+            # Iterate through the rest, and see if any are better!
+            for result in all_gs_results[1:]:
+                if result.best_score_ > best_score:
+                    trained_final_model = result.best_estimator_
+                    best_score = result.best_score_
 
-                self.trained_pipeline = gs.best_estimator_
+            # If we wanted to do something tricky, here would be the place to do it
+                # Train the final model up on more epochs, or with more trees
+                # Run a two-stage GSCV. First stage figures out activation function, second stage figures out architecture
 
-                # write the results for each param combo to file for user analytics.
-                if self.write_gs_param_results_to_file:
-                    utils.write_gs_param_results_to_file(gs, self.gs_param_file_name)
+        return trained_final_model
 
-                if self.print_training_summary_to_viewer:
-                    self.print_training_summary(gs)
+    def get_relevant_categorical_rows(self, X_df, y, category):
+        mask = X_df[self.categorical_column] == category
 
-                # We will save the info for this pipeline grid search, along with it's scores on the CV data, and the holdout data
-                pipeline_results = []
-                pipeline_results.append(gs.best_score_)
-                pipeline_results.append(gs)
+        relevant_indices = []
+        relevant_y = []
+        for idx, val in enumerate(mask):
+            if val == True:
+                relevant_indices.append(idx)
+                relevant_y.append(y[idx])
 
-                if self.continue_after_single_gscv == True:
+        relevant_X = X_df.iloc[relevant_indices]
 
-                    # Print ml_for_analytics here, since we break out of the loop before we can do it below
-                    if 'final_model__model' in gs.best_params_:
-                        model_name = gs.best_params_['final_model__model']
+        return relevant_X, relevant_y
 
-                    if self.ml_for_analytics and model_name in ('LogisticRegression', 'RidgeClassifier', 'LinearRegression', 'Ridge'):
-                        self._print_ml_analytics_results_linear_model()
 
-                    elif self.ml_for_analytics and model_name in ['RandomForestClassifier', 'RandomForestRegressor', 'XGBClassifier', 'XGBRegressor', 'GradientBoostingRegressor', 'GradientBoostingClassifier']:
-                        self._print_ml_analytics_results_random_forest()
+    def train_categorical_ensemble(self, data, categorical_column, default_category=None, min_category_size=5, **kwargs):
+        self.categorical_column = categorical_column
+        self.trained_category_models = {}
+        self.column_descriptions[categorical_column] = 'categorical'
+        self.min_category_size = min_category_size
 
-                    break
+        self.default_category = default_category
+        if self.default_category is None:
+            self.search_for_default_category = True
+            self.len_largest_category = 0
+        else:
+            self.search_for_default_category = False
 
-            # The case where we just want to run the training straight through, not fitting GridSearchCV
-            else:
-                if self.verbose:
-                    print('\n\n********************************************************************************************')
-                    if self.name is not None:
-                        print(self.name)
-                    print('About to fit the pipeline for the model ' + model_name + ' to predict ' + self.output_column)
-                    print('Started at:')
-                    start_time = datetime.datetime.now().replace(microsecond=0)
-                    print(start_time)
+        self.set_params_and_defaults(data, **kwargs)
 
-                ppl.fit(X_df, y)
-                self.trained_pipeline = ppl
 
-                if self.verbose:
-                    print('Finished training the pipeline!')
-                    print('Total training time:')
-                    print(datetime.datetime.now().replace(microsecond=0) - start_time)
+        X_df, y, estimator_names = self._clean_data_and_prepare_for_training(data, self.scoring)
+        X_df = X_df.reset_index(drop=True)
+        X_df = utils_categorical_ensembling.clean_categorical_definitions(X_df, categorical_column)
 
-            if self.ml_for_analytics and model_name in ('LogisticRegression', 'RidgeClassifier', 'LinearRegression', 'Ridge'):
-                self._print_ml_analytics_results_linear_model()
-            elif self.ml_for_analytics and model_name in ['RandomForestClassifier', 'RandomForestRegressor', 'XGBClassifier', 'XGBRegressor', 'GradientBoostingRegressor', 'GradientBoostingClassifier']:
-                self._print_ml_analytics_results_random_forest()
+        print('Now fitting a single feature transformation pipeline that will be shared by all of our categorical estimators for the sake of space efficiency when saving the model')
+        if self.feature_learning == True:
+            # For simplicity's sake, we are training one feature_learning model on all of the data, across all categories
+            # Deep Learning models love a ton of data, so we're giving all of it to the model
+            # This also makes stuff like serializing the model and the transformation pipeline and the saved file size all better
+            # Then, each categorical model will determine which features (if any) are useful for it's particular category
+            X_df_transformed = self.fit_feature_learning_and_transformation_pipeline(X_df, kwargs['fl_data'], y)
+        else:
+            X_df_transformed = self.fit_transformation_pipeline(X_df, y, estimator_names[0])
 
-            if (self.X_test) is not None and (self.y_test) is not None:
-                if len(self.X_test) > 0 and len(self.y_test) > 0 and len(self.X_test) == len(self.y_test):
-                    print('Calculating score on holdout data')
-                    holdout_data_score = self.score(self.X_test, self.y_test)
-                    print('The results from the X_test and y_test data passed into ml_for_analytics (which were not used for training- true holdout data)')
-                    print(self.output_column + ':')
-                    print(holdout_data_score)
+        unique_categories = X_df[categorical_column].unique()
 
-                try:
-                    # We want our score on the holdout data to be the first thing in our pipeline results tuple. This is what we will be selecting our best model from.
-                    pipeline_results.prepend(holdout_data_score)
-                except:
-                    # If we do not have pipeline_results defined already, that means we did not fit grid search, but are relying on X_test/y_test to determine our best model
-                    pipeline_results = []
-                    pipeline_results.append(holdout_data_score)
-                    pipeline_results.append(self.trained_pipeline)
+        # Iterate through categories to find:
+        # 1. index positions of that category within X_df (and thus, X_df_transformed, and y)
+        # 2. some sorting (either alphabetical, size of category, or ideally, sorted by magnitude of y value)
+            # 3. size of category would be most efficient. if we have 8 cores and 13 categories, we don't want to save the largest category for the last one, even if from an analytics perspective that's the one we would want last
+        # 4. create a map from category name to indexes
+        # 5. sort by len(indices)
+        # 6. iterate through that, creating a new mapping from category_name to the relevant data for that category
+            # pull that data from X_df_transformed
+        # 7. map over that list to train a new predictor for each category!
 
-                    # If we don't have pipeline_results (if we did not fit GSCV), then pass
-                    pass
+        categories_and_indices = []
+        for category in unique_categories:
+            rel_column = X_df[self.categorical_column]
+            indices = list(np.flatnonzero(X_df[self.categorical_column] == category))
+            categories_and_indices.append([category, indices])
+
+        categories_and_data = []
+        for pair in sorted(categories_and_indices, key=lambda x: len(x[1])):
+            category = pair[0]
+            indices = pair[1]
+
+            if len(indices) > self.min_category_size:
+                relevant_transformed_rows = X_df_transformed[indices]
+                relevant_y = [y[idx_val] for idx_val in indices]
+                categories_and_data.append([category, relevant_transformed_rows, relevant_y])
+
+
+        def train_one_categorical_model(category, relevant_X, relevant_y):
+            print('\n\nNow training a new estimator for the category: ' + str(category))
+
+            print('Some stats on the y values for this category: ' + str(category))
+            print(pd.Series(relevant_y).describe(include='all'))
+
 
             try:
-                self.grid_search_pipelines.append(pipeline_results)
-            except Exception as e:
-                pass
+                category_trained_final_model = self.train_ml_estimator(estimator_names, self._scorer, relevant_X, relevant_y)
+            except ValueError as e:
+                if 'BinomialDeviance requires 2 classes' in str(e) or 'BinomialDeviance requires 2 classes' in e or 'BinomialDeviance requires 2 classes' in e.get('message', None):
+                    print('Found a category with only one label')
+                    print('category: ' + str(category) + ', label: ' + str(relevant_y[0]))
+                    print('We will put in place a weak estimator trained on only this category/single-label, but consider some feature engineering work to combine this with a different category, or remove it altogether and use the default category when getting predictions for this category.')
+                    # This handles the edge case of having only one label for a given category
+                    # In that case, some models are perfectly fine being 100% correct, while others freak out
+                    # RidgeClassifier seems ok at just picking the same value each time. And using it instead of a custom function means we don't need to add in any custom logic for predict_proba or anything
+                    category_trained_final_model = self.train_ml_estimator(['RidgeClassifier'], self._scorer, relevant_X, relevant_y)
+                else:
+                    raise
 
-            # if self.fit_grid_search:
+            self.trained_category_models[category] = category_trained_final_model
+
+            try:
+                category_length = len(relevant_X)
+            except TypeError:
+                category_length = relevant_X.shape[0]
+
+            result = {
+                'trained_category_model': category_trained_final_model
+                , 'category': category
+                , 'len_relevant_X': category_length
+            }
+            return result
+
+        pool = pathos.multiprocessing.ProcessPool()
+
+        # Since we may have already closed the pool, try to restart it
+        try:
+            pool.restart()
+        except AssertionError as e:
+            pass
+
+        if os.environ.get('is_test_suite', False) == 'True':
+            # If this is the test_suite, do not run things in parallel
+            results = list(map(lambda x: train_one_categorical_model(x[0], x[1], x[2]), categories_and_data))
+        else:
+            try:
+                results = list(pool.map(lambda x: train_one_categorical_model(x[0], x[1], x[2]), categories_and_data))
+            except RuntimeError:
+                # Deep Learning models require a ton of recursion. I've tried to work around it, but sometimes we just need to brute force the solution here
+                original_recursion_limit = sys.getrecursionlimit()
+                sys.setrecursionlimit(10000)
+                results = list(pool.map(lambda x: train_one_categorical_model(x[0], x[1], x[2]), categories_and_data))
+                sys.setrecursionlimit(original_recursion_limit)
+
+        # Once we have gotten all we need from the pool, close it so it's not taking up unnecessary memory
+        pool.close()
+        try:
+            pool.join()
+        except AssertionError:
+            pass
+
+        for result in results:
+            if result['trained_category_model'] is not None:
+                category = result['category']
+                self.trained_category_models[category] = result['trained_category_model']
+                if self.search_for_default_category == True and result['len_relevant_X'] > self.len_largest_category:
+                    self.default_category = category
+                    self.len_largest_category = result['len_relevant_X']
+
+        print('Finished training all the category models!')
+
+        if self.search_for_default_category == True:
+            print('By default, auto_ml finds the largest category, and uses that if asked to get predictions for any rows which come from a category that was not included in the training data (i.e., if you launch a new market and ask us to get predictions for it, we will default to using your largest market to get predictions for the market that was not included in the training data')
+            print('To avoid this behavior, you can either choose your own default category (the "default_category" parameter to train_categorical_ensemble), or pass in "_RAISE_ERROR" as the value for default_category, and we will raise an error when trying to get predictions for a row coming from a category that was not included in the training data.')
+            print('Here is the default category we selected:')
+            print(self.default_category)
+
+        categorical_ensembler = utils_categorical_ensembling.CategoricalEnsembler(self.trained_category_models, self.transformation_pipeline, self.categorical_column, self.default_category)
+        self.trained_pipeline = categorical_ensembler
+
 
 
     def _get_xgb_feat_importances(self, clf):
@@ -872,19 +925,28 @@ class Predictor(object):
 
 
     def _print_ml_analytics_results_random_forest(self):
-        print('\n\nHere are the results from our ' + self.trained_pipeline.named_steps['final_model'].model_name)
+        try:
+            final_model_obj = self.trained_final_model.named_steps['final_model']
+        except:
+            final_model_obj = self.trained_final_model
+
+        print('\n\nHere are the results from our ' + final_model_obj.model_name)
         if self.name is not None:
             print(self.name)
         print('predicting ' + self.output_column)
 
         # XGB's Classifier has a proper .feature_importances_ property, while the XGBRegressor does not.
-        if self.trained_pipeline.named_steps['final_model'].model_name in ['XGBRegressor', 'XGBClassifier']:
-            self._get_xgb_feat_importances(self.trained_pipeline.named_steps['final_model'].model)
+        if final_model_obj.model_name in ['XGBRegressor', 'XGBClassifier']:
+            self._get_xgb_feat_importances(final_model_obj.model)
 
         else:
             trained_feature_names = self._get_trained_feature_names()
 
-            trained_feature_importances = self.trained_pipeline.named_steps['final_model'].model.feature_importances_
+            try:
+                trained_feature_importances = final_model_obj.model.feature_importances_
+            except AttributeError as e:
+                # There was a version of LightGBM that had this misnamed to miss the "s" at the end
+                trained_feature_importances = final_model_obj.model.feature_importance_
 
             feature_infos = zip(trained_feature_names, trained_feature_importances)
 
@@ -898,29 +960,31 @@ class Predictor(object):
 
     def _get_trained_feature_names(self):
 
-        trained_feature_names = self.trained_pipeline.named_steps['dv'].get_feature_names()
+        try:
+            trained_feature_names = self.trained_pipeline.named_steps['dv'].get_feature_names()
+        except AttributeError:
+            trained_feature_names = self.transformation_pipeline.named_steps['dv'].get_feature_names()
 
         return trained_feature_names
 
 
     def _print_ml_analytics_results_linear_model(self):
-        print('\n\nHere are the results from our ' + self.trained_pipeline.named_steps['final_model'].model_name)
+        try:
+            final_model_obj = self.trained_final_model.named_steps['final_model']
+        except:
+            final_model_obj = self.trained_final_model
+        print('\n\nHere are the results from our ' + final_model_obj.model_name + ' model')
 
         trained_feature_names = self._get_trained_feature_names()
 
         if self.type_of_estimator == 'classifier':
-            trained_coefficients = self.trained_pipeline.named_steps['final_model'].model.coef_[0]
+            trained_coefficients = final_model_obj.model.coef_[0]
+            # Note to self: this used to be accessing the [0]th index of .coef_ for classifiers. Not sure why.
         else:
-            trained_coefficients = self.trained_pipeline.named_steps['final_model'].model.coef_
+            trained_coefficients = final_model_obj.model.coef_
 
-        # feature_ranges = self.trained_pipeline.named_steps['final_model'].feature_ranges
-
-        # TODO(PRESTON): readability. Can probably do this in a single zip statement.
         feature_summary = []
         for col_idx, feature_name in enumerate(trained_feature_names):
-            # Ignoring potential_impact for now, since we're performing feature scaling by default
-            # potential_impact = feature_ranges[col_idx] * trained_coefficients[col_idx]
-            # summary_tuple = (feature_name, trained_coefficients[col_idx], potential_impact)
             summary_tuple = (feature_name, trained_coefficients[col_idx])
             feature_summary.append(summary_tuple)
 
@@ -931,8 +995,6 @@ class Predictor(object):
         for summary in sorted_feature_summary[-50:]:
 
             print(str(summary[0]) + ': ' + str(round(summary[1], 4)))
-            # Again, we're ignoring feature_ranges for now since we apply feature scaling by default
-            # print('The potential impact of this feature is: ' + str(round(summary[2], 4)))
 
 
     def print_training_summary(self, gs):
@@ -943,10 +1005,10 @@ class Predictor(object):
         print('The best params were')
 
         # Remove 'final_model__model' from what we print- it's redundant with model name, and is difficult to read quickly in a list since it's a python object.
-        if 'final_model__model' in gs.best_params_:
+        if 'model' in gs.best_params_:
             printing_copy = {}
             for k, v in gs.best_params_.items():
-                if k != 'final_model__model':
+                if k != 'model':
                     printing_copy[k] = v
                 else:
                     printing_copy[k] = utils_models.get_name_from_model(v)
@@ -961,11 +1023,9 @@ class Predictor(object):
             sorted_scores = sorted(raw_scores, key=lambda x: x[1], reverse=True)
             for score in sorted_scores:
                 for k, v in score[0].items():
-                    if k == 'final_model__model':
+                    if k == 'model':
                         score[0][k] = utils_models.get_name_from_model(v)
                 print(score)
-        # Print some nice summary output of all the training we did.
-        # maybe allow the user to pass in a flag to write info to a file
 
 
     def predict(self, prediction_data):
@@ -980,7 +1040,6 @@ class Predictor(object):
             for idx, val in predicted_vals:
                 predicted_vals[idx] = math.exp(val)
 
-        # del prediction_data
         return predicted_vals
 
 
@@ -997,6 +1056,8 @@ class Predictor(object):
         if isinstance(X_test, list):
             X_test = pd.DataFrame(X_test)
         y_test = list(y_test)
+
+        X_test, y_test = utils.drop_missing_y_vals(X_test, y_test, self.output_column)
 
         if self._scorer is not None:
             if self.type_of_estimator == 'regressor':
@@ -1018,17 +1079,115 @@ class Predictor(object):
 
 
     def save(self, file_name='auto_ml_saved_pipeline.dill', verbose=True):
+
+        def save_one_step(pipeline_step, used_deep_learning):
+            try:
+                if pipeline_step.model_name[:12] == 'DeepLearning':
+                    used_deep_learning = True
+
+                    random_name = str(random.random())
+
+                    keras_file_name = file_name[:-5] + random_name + '_keras_deep_learning_model.h5'
+
+                    # Save a reference to this so we can put it back in place later
+                    keras_wrapper = pipeline_step.model
+                    model_name_map[random_name] = keras_wrapper
+
+                    # Save the Keras model (which we have to extract from the sklearn wrapper)
+                    try:
+                        pipeline_step.model.save(keras_file_name)
+                    except AttributeError as e:
+                        # I'm not entirely clear why, but sometimes we need to access the ".model" property within a KerasRegressor or KerasClassifier, and sometimes we don't
+                        pipeline_step.model.model.save(keras_file_name)
+
+                    # Now that we've saved the keras model, set that spot in the pipeline to our random name, because otherwise we're at risk for recursionlimit errors (the model is very recursively deep)
+                    # Using the random_name allows us to find the right model later if we have several (or several thousand) models to put back into place in the pipeline when we save this later
+                    pipeline_step.model = random_name
+
+
+            except AttributeError as e:
+                pass
+
+            return used_deep_learning
+
+
+        used_deep_learning = False
+
+        # This is where we will store all of our Keras models by their name, so we can put them back in place once we've taken them out and saved the rest of the pipeline
+        model_name_map = {}
+        if isinstance(self.trained_pipeline, utils_categorical_ensembling.CategoricalEnsembler):
+            for step in self.trained_pipeline.transformation_pipeline.named_steps:
+                pipeline_step = self.trained_pipeline.transformation_pipeline.named_steps[step]
+
+                used_deep_learning = save_one_step(pipeline_step, used_deep_learning)
+
+            for step in self.trained_pipeline.trained_models:
+                pipeline_step = self.trained_pipeline.trained_models[step]
+
+                used_deep_learning = save_one_step(pipeline_step, used_deep_learning)
+
+        else:
+
+            for step in self.trained_pipeline.named_steps:
+                pipeline_step = self.trained_pipeline.named_steps[step]
+
+                used_deep_learning = save_one_step(pipeline_step, used_deep_learning)
+
+        # Now, whether we had deep learning models in there or not, save the structure of the whole pipeline
+        # We've already removed the deep learning models from it if they existed, so they won't be throwing recursion errors here
         with open(file_name, 'wb') as open_file_name:
             dill.dump(self.trained_pipeline, open_file_name)
+
+
+        # If we used deep learning, put the models back in place, so the predictor instance that's already loaded in memory will continue to work like the user expects (rather than forcing them to load it back in from disk again)
+        if used_deep_learning == True:
+            if isinstance(self.trained_pipeline, utils_categorical_ensembling.CategoricalEnsembler):
+                for step in self.trained_pipeline.transformation_pipeline.named_steps:
+                    pipeline_step = self.trained_pipeline.transformation_pipeline.named_steps[step]
+
+                    try:
+                        model_name = pipeline_step.model
+                        pipeline_step.model = model_name_map[model_name]
+                    except AttributeError:
+                        pass
+
+                for step in self.trained_pipeline.trained_models:
+                    pipeline_step = self.trained_pipeline.trained_models[step]
+
+                    try:
+                        model_name = pipeline_step.model
+                        if isinstance(model_name, str):
+                            pipeline_step.model = model_name_map[model_name]
+                    except AttributeError:
+                        pass
+
+            else:
+
+                for step in self.trained_pipeline.named_steps:
+                    pipeline_step = self.trained_pipeline.named_steps[step]
+                    try:
+                        if pipeline_step.get('model_name', 'nonsensicallongstring')[:12] == 'DeepLearning':
+
+                            model_name = pipeline_step.model
+                            pipeline_step.model = model_name_map[model_name]
+                    except AttributeError as e:
+                        pass
+
+
 
         if verbose:
             print('\n\nWe have saved the trained pipeline to a filed called "' + file_name + '"')
             print('It is saved in the directory: ')
             print(os.getcwd())
             print('To use it to get predictions, please follow the following flow (adjusting for your own uses as necessary:\n\n')
-            print('`with open("' + file_name + '", "rb") as read_file:`')
-            print('`    trained_ml_pipeline = dill.load(read_file)`')
-            print('`trained_ml_pipeline.predict(list_of_dicts_with_same_data_as_training_data)`\n\n')
+            print('`from auto_ml.utils_models import load_ml_model')
+            print('`trained_ml_pipeline = load_ml_model("' + file_name + '")')
+            print('`trained_ml_pipeline.predict(data)`\n\n')
+
+            if used_deep_learning == True:
+                print('While saving the trained_ml_pipeline, we found a number of deep learning models that we saved separately.')
+                print('Make sure to transfer these files to whichever environment you plan to load the trained pipeline in')
+                print('Specifically, we saved ' + str(len(model_name_map.keys())) + ' deep learning models to separate files')
 
             print('Note that this pickle/dill file can only be loaded in an environment with the same modules installed, and running the same Python version.')
             print('This version of Python is:')
@@ -1036,11 +1195,4 @@ class Predictor(object):
 
             print('\n\nWhen passing in new data to get predictions on, columns that were not present (or were not found to be useful) in the training data will be silently ignored.')
             print('It is worthwhile to make sure that you feed in all the most useful data points though, to make sure you can get the highest quality predictions.')
-            # print('\nThese are the most important features that were fed into the model:')
-
-            # if self.ml_for_analytics and self.trained_pipeline.named_steps['final_model'].model_name in ('LogisticRegression', 'RidgeClassifier', 'LinearRegression', 'Ridge'):
-            #     self._print_ml_analytics_results_linear_model()
-            # elif self.ml_for_analytics and self.trained_pipeline.named_steps['final_model'].model_name in ['RandomForestClassifier', 'RandomForestRegressor', 'XGBClassifier', 'XGBRegressor']:
-            #     self._print_ml_analytics_results_random_forest()
         return os.path.join(os.getcwd(), file_name)
-

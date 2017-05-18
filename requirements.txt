@@ -1,5 +1,10 @@
-scikit-learn
-scipy
-python-dateutil
+dill
+h5py
+keras
+numpy
 pandas
 pathos
+python-dateutil
+scikit-learn
+scipy
+tensorflow

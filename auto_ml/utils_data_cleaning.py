@@ -22,25 +22,42 @@ def clean_val(val):
     else:
         try:
             float_val = float(val)
-        except:
+        except ValueError:
             # This will throw a ValueError if it fails
             # remove any commas in the string, and try to turn into a float again
-            cleaned_string = val.replace(',', '')
-            float_val = float(cleaned_string)
+            try:
+                cleaned_string = val.replace(',', '')
+                float_val = float(cleaned_string)
+            except TypeError:
+                return None
         return float_val
 
 # Same as above, except this version returns float('nan') when it fails
 # This plays more nicely with df.apply, and assumes we will be handling nans appropriately when doing DataFrameVectorizer later.
 def clean_val_nan_version(val):
-    if str(val) in bad_vals_as_strings:
+    try:
+        str_val = str(val)
+    except UnicodeEncodeError as e:
+        print('Here is the value that causes the UnicodeEncodeError to be thrown:')
+        print(val)
+        raise(e)
+
+    if str_val in bad_vals_as_strings:
         return float('nan')
     else:
         try:
             float_val = float(val)
-        except:
+        except ValueError:
             # This will throw a ValueError if it fails
             # remove any commas in the string, and try to turn into a float again
-            cleaned_string = val.replace(',', '')
+            try:
+                cleaned_string = val.replace(',', '')
+            except TypeError:
+                print('*************************************')
+                print('We expected this value to be numeric, but were unable to convert it to a float:')
+                print(val)
+                print('*************************************')
+                return float('nan')
             try:
                 float_val = float(cleaned_string)
             except:
@@ -77,13 +94,34 @@ class BasicDataCleaning(BaseEstimator, TransformerMixin):
                     , max_features=3000
                 )
 
+    def get(self, prop_name, default=None):
+        try:
+            return getattr(self, prop_name)
+        except AttributeError:
+            return default
+
     def fit(self, X_df, y=None):
 
         # See if we should fit TfidfVectorizer or not
         for key in X_df.columns:
-            # col_desc = self.column_descriptions.get(key, False)
+
             if key in self.text_columns:
-                    self.text_columns[key].fit(X_df[key].astype(str, raise_on_error=False))
+                X_df[key].fillna('nan', inplace=True)
+                text_col = X_df[key].astype(str, raise_on_error=False)
+                self.text_columns[key].fit(text_col)
+
+                col_names = self.text_columns[key].get_feature_names()
+
+                # Make weird characters play nice, or just ignore them :)
+                for idx, word in enumerate(col_names):
+                    try:
+                        col_names[idx] = str(word)
+                    except:
+                        col_names[idx] = 'non_ascii_word_' + str(idx)
+
+                col_names = ['nlp_' + key + '_' + str(word) for word in col_names]
+
+                self.text_columns[key].cleaned_feature_names = col_names
 
         return self
 
@@ -116,14 +154,41 @@ class BasicDataCleaning(BaseEstimator, TransformerMixin):
                     dict_copy.update(date_feature_dict)
                 elif col_desc == 'categorical':
                     dict_copy[key] = val
-                # elif key in self.text_columns:
-                    # Add in logic to handle nlp columns here
+                elif key in self.text_columns:
+
+                    col_names = self.text_columns[key].cleaned_feature_names
+
+                    try:
+                        text_val = str(X[key])
+                    except UnicodeEncodeError:
+                        text_val = X[key].encode('ascii', 'ignore').decode('ascii')
+
+                    # the transform function expects a list
+                    text_val = [text_val]
+
+                    nlp_matrix = self.text_columns[key].transform(text_val)
+
+                    # From here, it's all about transforming the output from the tf-idf transform into a dictionary
+                    # Borrowed from: http://stackoverflow.com/a/40696119/3823857
+                    # it outputs a sparse csr matrics
+                    # first, we transform to coo
+                    nlp_matrix = nlp_matrix.tocoo()
+                    # Then, we grab the relevant column names
+                    relevant_col_names = []
+                    for col_idx in nlp_matrix.col:
+                        relevant_col_names.append(col_names[col_idx])
+
+                    # Then we zip together the relevant columns and the sparse data into a dictionary
+                    relevant_nlp_cols = {k:v for k,v in zip(relevant_col_names, nlp_matrix.data)}
+
+                    dict_copy.update(relevant_nlp_cols)
+
                 elif col_desc in vals_to_drop:
                     pass
-                    # del X[key]
             return dict_copy
 
         else:
+            X.reset_index(drop=True, inplace=True)
             for key in X.columns:
                 col_desc = self.column_descriptions.get(key)
                 if col_desc == 'categorical':
@@ -157,6 +222,17 @@ class BasicDataCleaning(BaseEstimator, TransformerMixin):
                             print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
                             print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n\n\n')
                         raise(e)
+                    except UnicodeEncodeError as e:
+                        print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+                        print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+                        print('We have found a column that is not marked as a categorical column that has unicode values in it')
+                        print('Here is the column name:')
+                        print(key)
+                        print('The actual value that caused the issue is logged right above the exclamation points')
+                        print('Please either mark this column as categorical, or clean up the values in this column')
+                        raise(e)
+                        print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+                        print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
 
 
 
@@ -165,17 +241,18 @@ class BasicDataCleaning(BaseEstimator, TransformerMixin):
 
                 elif key in self.text_columns:
 
-                    col_names = self.text_columns[key].get_feature_names()
+                    col_names = self.text_columns[key].cleaned_feature_names
 
-                    # Make weird characters play nice, or just ignore them :)
-                    for idx, word in enumerate(col_names):
-                        try:
-                            col_names[idx] = str(word)
-                        except:
-                            col_names[idx] = 'non_ascii_word_' + str(idx)
+                    # # Make weird characters play nice, or just ignore them :)
+                    # for idx, word in enumerate(col_names):
+                    #     try:
+                    #         col_names[idx] = str(word)
+                    #     except:
+                    #         col_names[idx] = 'non_ascii_word_' + str(idx)
 
-                    col_names = ['nlp_' + key + '_' + str(word) for word in col_names]
+                    # col_names = ['nlp_' + key + '_' + str(word) for word in col_names]
 
+                    X[key].fillna('nan', inplace=True)
                     nlp_matrix = self.text_columns[key].transform(X[key].astype(str, raise_on_error=False))
                     nlp_matrix = nlp_matrix.toarray()
 
@@ -201,8 +278,6 @@ class BasicDataCleaning(BaseEstimator, TransformerMixin):
                     warnings.warn('UnknownValueInColumnDescriptions: Please make sure all the values you pass into column_descriptions are valid.')
 
         # Historically we've deleted columns here. However, we're moving this to DataFrameVectorizer as part of a broader effort to reduce duplicate computation
-        # if len(cols_to_drop) > 0:
-        #     X = X.drop(cols_to_drop, axis=1)
         return X
 
 
@@ -276,8 +351,6 @@ def add_date_features_dict(row, date_col):
         pass
 
     date_feature_dict[date_col + '_is_weekend'] = date_val.weekday() in (5,6)
-
-    # del row[date_col]
 
     return date_feature_dict
 

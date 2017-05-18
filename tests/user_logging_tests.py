@@ -101,7 +101,7 @@ def test_nans_in_output_column():
 
     ml_predictor = Predictor(type_of_estimator='classifier', column_descriptions=column_descriptions)
 
-    ml_predictor.train(df_titanic_train, optimize_final_model=True)
+    ml_predictor.train(df_titanic_train)
 
     test_score = ml_predictor.score(df_titanic_test, df_titanic_test.survived)
 
@@ -119,6 +119,12 @@ def test_verify_features_does_not_work_by_default():
     with open(file_name, 'rb') as read_file:
         saved_ml_pipeline = dill.load(read_file)
     os.remove(file_name)
+    try:
+        keras_file_name = file_name[:-5] + '_keras_deep_learning_model.h5'
+        os.remove(keras_file_name)
+    except:
+        pass
+
 
     with warnings.catch_warnings(record=True) as w:
 
@@ -153,6 +159,12 @@ def test_verify_features_finds_missing_prediction_features():
     with open(file_name, 'rb') as read_file:
         saved_ml_pipeline = dill.load(read_file)
     os.remove(file_name)
+    try:
+        keras_file_name = file_name[:-5] + '_keras_deep_learning_model.h5'
+        os.remove(keras_file_name)
+    except:
+        pass
+
 
     # Remove the "age" column from our prediction data
     df_titanic_test = df_titanic_test.drop('age', axis=1)
@@ -196,6 +208,12 @@ def test_verify_features_finds_missing_training_features():
     with open(file_name, 'rb') as read_file:
         saved_ml_pipeline = dill.load(read_file)
     os.remove(file_name)
+    try:
+        keras_file_name = file_name[:-5] + '_keras_deep_learning_model.h5'
+        os.remove(keras_file_name)
+    except:
+        pass
+
 
 
     missing_features = saved_ml_pipeline.named_steps['final_model'].verify_features(df_titanic_test)
@@ -246,4 +264,28 @@ def test_verify_features_finds_no_missing_features_when_none_are_missing():
         print(len(missing_features['training_not_prediction']))
         assert len(missing_features['prediction_not_training']) == 0
         assert len(missing_features['training_not_prediction']) == 0
+
+
+def test_throws_warning_when_fl_data_equals_df_train():
+    df_titanic_train, df_titanic_test = utils.get_titanic_binary_classification_dataset()
+
+    column_descriptions = {
+        'survived': 'output'
+        , 'embarked': 'categorical'
+        , 'pclass': 'categorical'
+    }
+
+    ml_predictor = Predictor(type_of_estimator='classifier', column_descriptions=column_descriptions)
+
+    with warnings.catch_warnings(record=True) as w:
+
+        try:
+            ml_predictor.train(df_titanic_train, feature_learning=True, fl_data=df_titanic_train)
+        except KeyError as e:
+            pass
+    # We should not be getting to this line- we should be throwing an error above
+        for thing in w:
+            print(thing)
+        assert len(w) == 1
+
 
