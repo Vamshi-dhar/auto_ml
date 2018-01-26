@@ -4,8 +4,8 @@ import random
 import sys
 sys.path = [os.path.abspath(os.path.dirname(__file__))] + sys.path
 
-from auto_ml import Predictor
-from auto_ml.utils_models import load_ml_model
+from quantile_ml import Predictor
+from quantile_ml.utils_models import load_ml_model
 
 import dill
 from nose.tools import assert_equal, assert_not_equal, with_setup
@@ -94,7 +94,7 @@ def getting_single_predictions_regression(model_name=None):
     file_name = ml_predictor.save(str(random.random()))
 
     # if model_name == 'DeepLearningRegressor':
-    #     from auto_ml.utils_models import load_keras_model
+    #     from quantile_ml.utils_models import load_keras_model
 
     #     saved_ml_pipeline = load_keras_model(file_name)
     # else:
@@ -191,7 +191,7 @@ def feature_learning_getting_single_predictions_regression(model_name=None):
 
     file_name = ml_predictor.save(str(random.random()))
 
-    # from auto_ml.utils_models import load_keras_model
+    # from quantile_ml.utils_models import load_keras_model
 
     # saved_ml_pipeline = load_keras_model(file_name)
 
@@ -281,7 +281,7 @@ def feature_learning_categorical_ensembling_getting_single_predictions_regressio
 
     file_name = ml_predictor.save(str(random.random()))
 
-    from auto_ml.utils_models import load_ml_model
+    from quantile_ml.utils_models import load_ml_model
 
     saved_ml_pipeline = load_ml_model(file_name)
 

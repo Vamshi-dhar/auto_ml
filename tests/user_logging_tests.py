@@ -1,4 +1,4 @@
-# This set of tests id specifically designed to make sure auto_ml is user friendly- throwing useful warnings where possible about what specific actions the user can take to avoid an error, instead of throwing the non-obvious error messages that the underlying libraries will choke on.
+# This set of tests id specifically designed to make sure quantile_ml is user friendly- throwing useful warnings where possible about what specific actions the user can take to avoid an error, instead of throwing the non-obvious error messages that the underlying libraries will choke on.
 import datetime
 import dill
 from nose.tools import raises
@@ -9,7 +9,7 @@ import sys
 import warnings
 sys.path = [os.path.abspath(os.path.dirname(__file__))] + sys.path
 
-from auto_ml import Predictor
+from quantile_ml import Predictor
 import utils_testing as utils
 
 

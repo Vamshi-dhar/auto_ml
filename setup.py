@@ -5,7 +5,7 @@ https://github.com/pypa/sampleproject
 
 # python setup.py sdist bdist_wheel
 # python setup.py register
-# twine upload dist/auto_ml-VERSION_NUMBER*
+# twine upload dist/quantile_ml-VERSION_NUMBER*
 
 Built using this blog post as well:
 https://hynek.me/articles/sharing-your-labor-of-love-pypi-quick-and-dirty/
@@ -26,20 +26,20 @@ with open(path.join(here, 'README.md'), encoding='utf-8') as f:
     long_description = f.read()
 
 setup(
-    name='auto_ml',
+    name='quantile_ml',
 
     # Versions should comply with PEP440.  For a discussion on single-sourcing
     # the version across setup.py and the project code, see
     # https://packaging.python.org/en/latest/single_source_version.html
     # version='1.9.6',
-    version=open("auto_ml/_version.py").readlines()[-1].split()[-1].strip("\"'"),
+    version=open("quantile_ml/_version.py").readlines()[-1].split()[-1].strip("\"'"),
 
 
     description='Automated machine learning for production and analytics',
     long_description=long_description,
 
     # The project's main homepage.
-    url='https://github.com/ClimbsRocks/auto_ml',
+    url='https://github.com/ClimbsRocks/quantile_ml',
 
     # Author details
     author='Preston Parry',
@@ -84,7 +84,7 @@ setup(
 
     # You can just specify the packages manually here if your project is
     # simple. Or you can use find_packages().
-    packages=['auto_ml'],
+    packages=['quantile_ml'],
 
     # Alternatively, if you want to distribute just a my_module.py, uncomment
     # this:

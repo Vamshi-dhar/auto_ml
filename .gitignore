@@ -10,7 +10,7 @@ dev_script*.py
 old_data/*
 *.txt
 27-wheel/*
-auto_ml.egg-info/*
+quantile_ml.egg-info/*
 build/*
 dist/*
 venv/*

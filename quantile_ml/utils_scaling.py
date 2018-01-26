@@ -1,6 +1,6 @@
 from sklearn.base import BaseEstimator, TransformerMixin
 
-from auto_ml import utils
+from quantile_ml import utils
 
 
 # Used in CustomSparseScaler

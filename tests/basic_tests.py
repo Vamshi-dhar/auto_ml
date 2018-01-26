@@ -9,7 +9,7 @@ import sys
 sys.path = [os.path.abspath(os.path.dirname(__file__))] + sys.path
 os.environ['is_test_suite'] = 'True'
 
-from auto_ml import Predictor
+from quantile_ml import Predictor
 
 from nose.tools import assert_equal, assert_not_equal, with_setup
 from sklearn.metrics import accuracy_score

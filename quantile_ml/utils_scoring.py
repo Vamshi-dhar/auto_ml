@@ -1,7 +1,7 @@
 from collections import OrderedDict
 import math
 
-from auto_ml import utils
+from quantile_ml import utils
 import pandas as pd
 from sklearn.ensemble import GradientBoostingRegressor, GradientBoostingClassifier
 from sklearn.metrics import mean_squared_error, make_scorer, brier_score_loss, accuracy_score, explained_variance_score, mean_absolute_error, median_absolute_error, r2_score, log_loss, roc_auc_score

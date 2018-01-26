@@ -6,8 +6,8 @@ import scipy
 from sklearn.base import BaseEstimator, TransformerMixin
 import warnings
 
-from auto_ml import utils_models
-from auto_ml.utils_models import get_name_from_model
+from quantile_ml import utils_models
+from quantile_ml.utils_models import get_name_from_model
 
 keras_installed = False
 try:
@@ -327,6 +327,6 @@ class FinalModelATC(BaseEstimator, TransformerMixin):
         else:
             print('Figuring out what type X is')
             print(type(X))
-            print('If you see this message, please file a bug at https://github.com/ClimbsRocks/auto_ml')
+            print('If you see this message, please file a bug at https://github.com/ClimbsRocks/quantile_ml')
 
         return X

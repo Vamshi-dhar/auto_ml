@@ -7,8 +7,8 @@ import random
 import sys
 sys.path = [os.path.abspath(os.path.dirname(__file__))] + sys.path
 
-from auto_ml import Predictor
-from auto_ml.utils_models import load_ml_model
+from quantile_ml import Predictor
+from quantile_ml.utils_models import load_ml_model
 
 import dill
 import numpy as np
@@ -161,7 +161,7 @@ def test_user_input_func_classification(model_name=None):
     file_name = ml_predictor.save(str(random.random()))
 
     # if model_name == 'DeepLearningClassifier':
-    #     from auto_ml.utils_models import load_keras_model
+    #     from quantile_ml.utils_models import load_keras_model
 
     #     saved_ml_pipeline = load_keras_model(file_name)
     # else:
@@ -298,9 +298,9 @@ def test_binary_classification_predict_proba_on_Predictor_instance(model_name=No
 
 
 # For some reason, this test now causes a Segmentation Default on travis when run on python 3.5.
-# home/travis/.travis/job_stages: line 53:  8810 Segmentation fault      (core dumped) nosetests -v --with-coverage --cover-package auto_ml tests
+# home/travis/.travis/job_stages: line 53:  8810 Segmentation fault      (core dumped) nosetests -v --with-coverage --cover-package quantile_ml tests
 # It didn't error previously
-# It appears to be an environment issue (possibly cuased by running too many parallelized things, which only happens in a test suite), not an issue with auto_ml. So we'll run this test to make sure the library functionality works, but only on some environments
+# It appears to be an environment issue (possibly cuased by running too many parallelized things, which only happens in a test suite), not an issue with quantile_ml. So we'll run this test to make sure the library functionality works, but only on some environments
 if os.environ.get('TRAVIS_PYTHON_VERSION', '0') != '3.5':
     def test_compare_all_models_classification(model_name=None):
         np.random.seed(0)
@@ -454,7 +454,7 @@ def test_list_of_single_model_name_classification(model_name=None):
 
 if os.environ.get('TRAVIS_PYTHON_VERSION', '0') != '3.5':
     def test_getting_single_predictions_nlp_date_multilabel_classification(model_name=None):
-        # auto_ml does not support multilabel classification for deep learning at the moment
+        # quantile_ml does not support multilabel classification for deep learning at the moment
         if model_name == 'DeepLearningClassifier':
             return
 
@@ -477,7 +477,7 @@ if os.environ.get('TRAVIS_PYTHON_VERSION', '0') != '3.5':
         file_name = ml_predictor.save(str(random.random()))
 
         # if model_name == 'DeepLearningClassifier':
-        #     from auto_ml.utils_models import load_keras_model
+        #     from quantile_ml.utils_models import load_keras_model
 
         #     saved_ml_pipeline = load_keras_model(file_name)
         # else:

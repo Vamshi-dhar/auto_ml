@@ -11,7 +11,7 @@ import pathos
 import numpy as np
 import pandas as pd
 
-# Ultimately, we (the authors of auto_ml) are responsible for building a project that's robust against warnings.
+# Ultimately, we (the authors of quantile_ml) are responsible for building a project that's robust against warnings.
 # The classes of warnings below are ones we've deemed acceptable. The user should be able to sit at a high level of abstraction, and not be bothered with the internals of how we're handing these things.
 # Ignore all warnings that are UserWarnings or DeprecationWarnings. We'll fix these ourselves as necessary.
 # warnings.filterwarnings("ignore", category=UserWarning)
@@ -27,15 +27,15 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer
 
 
-from auto_ml import DataFrameVectorizer
-from auto_ml import utils
-from auto_ml import utils_categorical_ensembling
-from auto_ml import utils_data_cleaning
-from auto_ml import utils_feature_selection
-from auto_ml import utils_model_training
-from auto_ml import utils_models
-from auto_ml import utils_scaling
-from auto_ml import utils_scoring
+from quantile_ml import DataFrameVectorizer
+from quantile_ml import utils
+from quantile_ml import utils_categorical_ensembling
+from quantile_ml import utils_data_cleaning
+from quantile_ml import utils_feature_selection
+from quantile_ml import utils_model_training
+from quantile_ml import utils_models
+from quantile_ml import utils_scaling
+from quantile_ml import utils_scoring
 
 xgb_installed = False
 try:
@@ -337,7 +337,7 @@ class Predictor(object):
             if self.perform_feature_scaling == False:
                 print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
                 print('Heard that we should not perform feature_scaling, but we should perform feature_learning. Note that feature_scaling is typically useful for deep learning, which is what we use for feature_learning. If you want a little more model accuracy from the feature_learning step, consider not passing in perform_feature_scaling=False')
-                warnings.warn('Consider allowing auto_ml to perform_feature_scaling in conjunction with feature_learning')
+                warnings.warn('Consider allowing quantile_ml to perform_feature_scaling in conjunction with feature_learning')
 
             if self.perform_feature_selection == True:
                 print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
@@ -456,8 +456,8 @@ class Predictor(object):
         self.set_params_and_defaults(raw_training_data, user_input_func=user_input_func, optimize_final_model=optimize_final_model, write_gs_param_results_to_file=write_gs_param_results_to_file, perform_feature_selection=perform_feature_selection, verbose=verbose, X_test=X_test, y_test=y_test, ml_for_analytics=ml_for_analytics, take_log_of_y=take_log_of_y, model_names=model_names, perform_feature_scaling=perform_feature_scaling, calibrate_final_model=calibrate_final_model, _scorer=_scorer, scoring=scoring, verify_features=verify_features, training_params=training_params, grid_search_params=grid_search_params, compare_all_models=compare_all_models, cv=cv, feature_learning=feature_learning, fl_data=fl_data)
 
         if verbose:
-            print('Welcome to auto_ml! We\'re about to go through and make sense of your data using machine learning, and give you a production-ready pipeline to get predictions with.\n')
-            print('If you have any issues, or new feature ideas, let us know at https://github.com/ClimbsRocks/auto_ml')
+            print('Welcome to quantile_ml! We\'re about to go through and make sense of your data using machine learning, and give you a production-ready pipeline to get predictions with.\n')
+            print('If you have any issues, or new feature ideas, let us know at https://github.com/ClimbsRocks/quantile_ml')
 
 
         X_df, y, estimator_names = self._clean_data_and_prepare_for_training(raw_training_data, scoring)
@@ -873,7 +873,7 @@ class Predictor(object):
         print('Finished training all the category models!')
 
         if self.search_for_default_category == True:
-            print('By default, auto_ml finds the largest category, and uses that if asked to get predictions for any rows which come from a category that was not included in the training data (i.e., if you launch a new market and ask us to get predictions for it, we will default to using your largest market to get predictions for the market that was not included in the training data')
+            print('By default, quantile_ml finds the largest category, and uses that if asked to get predictions for any rows which come from a category that was not included in the training data (i.e., if you launch a new market and ask us to get predictions for it, we will default to using your largest market to get predictions for the market that was not included in the training data')
             print('To avoid this behavior, you can either choose your own default category (the "default_category" parameter to train_categorical_ensemble), or pass in "_RAISE_ERROR" as the value for default_category, and we will raise an error when trying to get predictions for a row coming from a category that was not included in the training data.')
             print('Here is the default category we selected:')
             print(self.default_category)
@@ -1078,7 +1078,7 @@ class Predictor(object):
             return self.trained_pipeline.score(X_test, y_test)
 
 
-    def save(self, file_name='auto_ml_saved_pipeline.dill', verbose=True):
+    def save(self, file_name='quantile_ml_saved_pipeline.dill', verbose=True):
 
         def save_one_step(pipeline_step, used_deep_learning):
             try:
@@ -1180,7 +1180,7 @@ class Predictor(object):
             print('It is saved in the directory: ')
             print(os.getcwd())
             print('To use it to get predictions, please follow the following flow (adjusting for your own uses as necessary:\n\n')
-            print('`from auto_ml.utils_models import load_ml_model')
+            print('`from quantile_ml.utils_models import load_ml_model')
             print('`trained_ml_pipeline = load_ml_model("' + file_name + '")')
             print('`trained_ml_pipeline.predict(data)`\n\n')
 

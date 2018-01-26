@@ -25,5 +25,5 @@ RUN pip install dill h5py scikit-learn scipy python-dateutil pandas pathos keras
 
 # To update this image and upload it:
 # docker build -t testdocker .
-# docker tag testdocker climbsrocks/auto_ml_tests:0.0.2
-# docker push climbsrocks/auto_ml_tests:0.0.2
+# docker tag testdocker climbsrocks/quantile_ml_tests:0.0.2
+# docker push climbsrocks/quantile_ml_tests:0.0.2

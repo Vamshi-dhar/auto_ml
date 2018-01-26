@@ -263,7 +263,7 @@ class BasicDataCleaning(BaseEstimator, TransformerMixin):
 
                 else:
                     # If we have gotten here, the value is not any that we recognize
-                    # This is most likely a typo that the user would want to be informed of, or a case while we're developing on auto_ml itself.
+                    # This is most likely a typo that the user would want to be informed of, or a case while we're developing on quantile_ml itself.
                     # In either case, it's useful to log it.
                     print('When transforming the data, we have encountered a value in column_descriptions that is not currently supported. The column has been dropped to allow the rest of the pipeline to run. Here\'s the name of the column:' )
                     print(key)
@@ -332,7 +332,7 @@ def add_date_features_dict(row, date_col):
         return date_feature_dict
 
     # Make a copy of all the engineered features from the date, without modifying the original object at all
-    # This way the same original object can be passed into a number of different trained auto_ml predictors
+    # This way the same original object can be passed into a number of different trained quantile_ml predictors
 
 
     date_feature_dict[date_col + '_day_of_week'] = date_val.weekday()

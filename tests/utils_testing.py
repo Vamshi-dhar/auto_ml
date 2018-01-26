@@ -6,7 +6,7 @@ from sklearn.datasets import load_boston
 from sklearn.metrics import brier_score_loss, mean_squared_error
 from sklearn.model_selection import train_test_split
 
-from auto_ml import Predictor
+from quantile_ml import Predictor
 
 def get_boston_regression_dataset():
     boston = load_boston()

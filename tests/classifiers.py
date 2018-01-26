@@ -4,8 +4,8 @@ import random
 import sys
 sys.path = [os.path.abspath(os.path.dirname(__file__))] + sys.path
 
-from auto_ml import Predictor
-from auto_ml.utils_models import load_ml_model
+from quantile_ml import Predictor
+from quantile_ml.utils_models import load_ml_model
 
 
 import dill
@@ -100,7 +100,7 @@ def getting_single_predictions_classification(model_name=None):
 
     saved_ml_pipeline = load_ml_model(file_name)
     # if model_name == 'DeepLearningClassifier':
-    #     from auto_ml.utils_models import load_keras_model
+    #     from quantile_ml.utils_models import load_keras_model
 
     #     saved_ml_pipeline = load_keras_model(file_name)
     # else:
@@ -177,7 +177,7 @@ def getting_single_predictions_classification(model_name=None):
 
 
 def getting_single_predictions_multilabel_classification(model_name=None):
-    # auto_ml does not support multilabel classification for deep learning at the moment
+    # quantile_ml does not support multilabel classification for deep learning at the moment
     if model_name == 'DeepLearningClassifier':
         return
 
@@ -200,7 +200,7 @@ def getting_single_predictions_multilabel_classification(model_name=None):
     file_name = ml_predictor.save(str(random.random()))
 
     # if model_name == 'DeepLearningClassifier':
-    #     from auto_ml.utils_models import load_keras_model
+    #     from quantile_ml.utils_models import load_keras_model
 
     #     saved_ml_pipeline = load_keras_model(file_name)
     # else:
@@ -296,7 +296,7 @@ def feature_learning_getting_single_predictions_classification(model_name=None):
     file_name = ml_predictor.save(str(random.random()))
 
 
-    # from auto_ml.utils_models import load_keras_model
+    # from quantile_ml.utils_models import load_keras_model
 
     saved_ml_pipeline = load_ml_model(file_name)
 
@@ -395,7 +395,7 @@ def feature_learning_categorical_ensembling_getting_single_predictions_classific
 
     # with open(file_name, 'rb') as read_file:
     #     saved_ml_pipeline = dill.load(read_file)
-    from auto_ml.utils_models import load_ml_model
+    from quantile_ml.utils_models import load_ml_model
 
     saved_ml_pipeline = load_ml_model(file_name)
 

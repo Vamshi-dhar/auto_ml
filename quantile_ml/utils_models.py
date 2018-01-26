@@ -2,7 +2,7 @@ import dill
 import os
 import sys
 
-from auto_ml import utils_categorical_ensembling
+from quantile_ml import utils_categorical_ensembling
 
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, ExtraTreesRegressor, AdaBoostRegressor, GradientBoostingRegressor, GradientBoostingClassifier, ExtraTreesClassifier, AdaBoostClassifier
 
@@ -45,7 +45,7 @@ except ImportError as e:
     print(e)
     pass
 
-from auto_ml import utils
+from quantile_ml import utils
 
 
 
