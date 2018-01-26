@@ -1,3 +1,6 @@
+# Notes
+Renamed auto_ml 2.9.5 package to quantile_ml to support quantile regressions in LGBM 2.0.12
+
 # quantile_ml
 > Automated machine learning for production and analytics
 
